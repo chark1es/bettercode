@@ -345,23 +345,18 @@ export async function isClaudeCliAuthenticatedAsync(): Promise<boolean> {
 }
 
 /**
- * opencode stores its `auth login` credentials in `auth.json` under its XDG
- * data home (`~/.local/share/opencode/` by default), with a legacy `~/.opencode`
- * fallback. Setting OPENCODE_API_KEY (or any provider key through the CLI's own
- * env resolution) also counts — the server accepts it without auth.json.
+ * opencode stores its `auth login` credentials in `auth.json` under its data
+ * home. opencode always uses `~/.local/share/opencode/` — including on
+ * Windows — unless XDG_DATA_HOME overrides it, so the legacy `~/.opencode`
+ * location and OPENCODE_API_KEY are the only other accepted states.
  */
 export async function isOpencodeCliAuthenticatedAsync(): Promise<boolean> {
   if (process.env.OPENCODE_API_KEY?.trim()) {
     return true;
   }
-  const dataHome =
-    process.env.XDG_DATA_HOME?.trim() ||
-    (IS_WIN
-      ? path.join(
-          process.env.LOCALAPPDATA || path.join(HOME, "AppData", "Local"),
-          "opencode",
-        )
-      : path.join(HOME, ".local", "share", "opencode"));
+  const dataHome = process.env.XDG_DATA_HOME?.trim()
+    ? path.join(process.env.XDG_DATA_HOME.trim(), "opencode")
+    : path.join(HOME, ".local", "share", "opencode");
   for (const candidate of [
     path.join(dataHome, "auth.json"),
     path.join(HOME, ".opencode", "auth.json"),
