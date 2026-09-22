@@ -126,6 +126,7 @@ describe("ProviderInstanceManager", () => {
       "claude",
       "cursor",
       "grok-cli",
+      "opencode-cli",
       "codex-work",
     ])
     expect(
@@ -172,6 +173,7 @@ describe("ProviderInstanceManager", () => {
       "codex",
       "cursor",
       "grok-cli",
+      "opencode-cli",
     ])
     expect(
       configs.find((config) => config.instanceId === "claude")
@@ -533,6 +535,7 @@ describe("ProviderInstanceManager", () => {
       "claude",
       "cursor",
       "grok-cli",
+      "opencode-cli",
     ])
 
     const enabled = deriveProviderInstanceConfigs(
@@ -550,6 +553,7 @@ describe("ProviderInstanceManager", () => {
       "cursor",
       "betterc0de",
       "grok-cli",
+      "opencode-cli",
     ])
   })
 

@@ -4,6 +4,7 @@ import path from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { defaultSettings, type Settings } from "@betterc0de/schema"
 import type { AcpEvent, AcpPermissionRequest, AcpRuntime } from "../provider/runtime/acp/AcpRuntimeBase"
+import { BETTERC0DE_COMPAT_PROFILE } from "../provider/runtime/betterc0deCompat/OpenCodeCompatProfile"
 import * as cursorBinaryResolution from "../provider/runtime/cursor/CursorBinaryResolution"
 import * as cursorRuntimeModule from "../provider/runtime/cursor/CursorAcpRuntime"
 import {
@@ -857,13 +858,17 @@ describe("native provider text generation", () => {
       binaryPath: "betterc0de-test",
       serverUrl: "http://127.0.0.1:4096",
       env: expect.any(Object),
+      profile: BETTERC0DE_COMPAT_PROFILE,
     })
-    expect(createBetterC0deClient).toHaveBeenCalledWith({
-      baseUrl: "http://127.0.0.1:4096",
-      directory: expect.any(String),
-      serverUsername: "alice",
-      serverPassword: "secret",
-    })
+    expect(createBetterC0deClient).toHaveBeenCalledWith(
+      {
+        baseUrl: "http://127.0.0.1:4096",
+        directory: expect.any(String),
+        serverUsername: "alice",
+        serverPassword: "secret",
+      },
+      BETTERC0DE_COMPAT_PROFILE
+    )
     expect(sessionCreate).toHaveBeenCalledWith(
       {
         title: "BetterC0de branchName",

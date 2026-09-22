@@ -59,7 +59,12 @@ import {
 const log = createLogger("settings-providers")
 
 type ProviderInstancesMap = Record<string, ProviderInstanceConfig>
-type ProviderInstanceDriver = "codex" | "claude" | "cursor" | "betterc0de"
+type ProviderInstanceDriver =
+  | "codex"
+  | "claude"
+  | "cursor"
+  | "betterc0de"
+  | "opencode-cli"
 
 function notifySettingsUpdated() {
   if (typeof window !== "undefined") {
@@ -869,6 +874,15 @@ function ProviderInstancesSection({
               variant="outline"
               size="sm"
               className="h-7 px-2 text-[10px]"
+              onClick={() => addInstance("opencode-cli")}
+            >
+              <PlusIcon className="size-3" />
+              OpenCode
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-[10px]"
               onClick={() => void onRefresh()}
               title="Refresh instance status"
             >
@@ -1033,7 +1047,8 @@ function ProviderInstancesSection({
                   }
                 />
               ) : null}
-              {config.driver === "betterc0de" ? (
+              {config.driver === "betterc0de" ||
+              config.driver === "opencode-cli" ? (
                 <>
                   <Input
                     className="h-8 font-mono text-xs"
@@ -1460,7 +1475,7 @@ function createProviderInstanceConfig(
       ...(driver === "codex" || driver === "claude" ? { homePath: "" } : {}),
       ...(driver === "codex" ? { shadowHomePath: "" } : {}),
       ...(driver === "cursor" ? { apiEndpoint: "" } : {}),
-      ...(driver === "betterc0de"
+      ...(driver === "betterc0de" || driver === "opencode-cli"
         ? { serverUrl: "", serverUsername: "", serverPassword: "" }
         : {}),
       customModels: [],
@@ -1476,6 +1491,8 @@ function defaultBinaryPath(driver: string): string {
       return "agent"
     case "betterc0de":
       return "betterc0de"
+    case "opencode-cli":
+      return "opencode"
     case "codex":
       return "codex"
     default:
@@ -1491,6 +1508,8 @@ function providerDriverLabel(driver: string | ProviderInstanceDriver): string {
       return "Cursor"
     case "betterc0de":
       return "BetterC0de"
+    case "opencode-cli":
+      return "OpenCode"
     case "codex":
       return "Codex"
     default:
@@ -1551,7 +1570,8 @@ function isDefaultInstance(instanceId: string): boolean {
     instanceId === "claude" ||
     instanceId === "cursor" ||
     instanceId === "betterc0de" ||
-    instanceId === "BetterC0de"
+    instanceId === "BetterC0de" ||
+    instanceId === "opencode-cli"
   )
 }
 
@@ -1561,5 +1581,6 @@ function instanceSortRank(instanceId: string): number {
   if (instanceId === "cursor") return 2
   if (instanceId === "betterc0de") return 3
   if (instanceId === "BetterC0de") return 4
+  if (instanceId === "opencode-cli") return 5
   return 10
 }
