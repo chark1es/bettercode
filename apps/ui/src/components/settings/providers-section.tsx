@@ -1,5 +1,6 @@
 import { isRecord } from "@betterc0de/schema"
 import { normalizeProviderInstanceConfig, normalizeProviderDriver as normalizeDriver, isValidEnvironmentDraft, changedProviderConfigFields } from "@/lib/provider-instance-settings"
+import { defaultInstanceIdForDriver, normalizeProviderDriverKind } from "@/lib/provider-instances"
 import { useState, useCallback, useEffect, useRef } from "react"
 import { cn } from "@/lib/utils"
 import { SettingsSection, SettingsRow } from "@/components/settings/atoms"
@@ -321,6 +322,15 @@ export function SettingsProvidersSection() {
           oauthBusy={!!oauthBusy[provider.id]}
           keyStatus={keyStatus[provider.id] ?? "idle"}
           cliStatus={cliStatus[provider.id]}
+          liveModels={
+            instanceSnapshots.find(
+              (snapshot) =>
+                snapshot.instanceId ===
+                defaultInstanceIdForDriver(
+                  normalizeProviderDriverKind(provider.id)
+                )
+            )?.models ?? []
+          }
           onSaveKey={saveKey}
           onStartOauth={startOauth}
           onClearAuth={clearAuth}
@@ -346,6 +356,10 @@ interface ProviderRowProps {
   oauthBusy: boolean
   keyStatus: "idle" | "checking" | "valid" | "invalid"
   cliStatus: CliStatus | undefined
+  /** Live model slugs from the default instance's runtime inventory, merged
+   *  into the Visible Models list so CLI inventories (OpenCode, Cursor…)
+   *  stay toggled without re-shipping a static default list. */
+  liveModels: ProviderInstanceSnapshot["models"]
   onSaveKey: (providerId: string, key: string, value: unknown) => Promise<void>
   onStartOauth: (providerId: string, handler: string) => Promise<void>
   onClearAuth: (providerId: string) => Promise<void>
@@ -359,6 +373,7 @@ function ProviderRow({
   oauthBusy,
   keyStatus,
   cliStatus,
+  liveModels,
   onSaveKey,
   onStartOauth,
   onClearAuth,
@@ -620,29 +635,39 @@ function ProviderRow({
       </SettingsRow>
 
       {/* Hidden models */}
-      {provider.defaultModels.length > 0 && (
-        <SettingsRow
-          label="Visible Models"
-          description="Toggle models on/off in the dropdown"
-        >
-          <div className="w-[280px] space-y-0.5">
-            {provider.defaultModels.map((m) => (
-              <div key={m} className="flex items-center gap-2 text-[10px]">
-                <Switch
-                  checked={!hiddenModels.includes(m)}
-                  onCheckedChange={(v) => {
-                    const next = v
-                      ? hiddenModels.filter((h) => h !== m)
-                      : [...hiddenModels, m]
-                    void onSaveKey(provider.id, "hidden_models", next)
-                  }}
-                />
-                <span className="font-mono text-muted-foreground">{m}</span>
-              </div>
-            ))}
-          </div>
-        </SettingsRow>
-      )}
+      {(() => {
+        const visibleModelIds = [...provider.defaultModels]
+        for (const model of liveModels ?? []) {
+          const slug = model.slug?.trim()
+          if (slug && !visibleModelIds.includes(slug)) visibleModelIds.push(slug)
+        }
+        if (visibleModelIds.length === 0) return null
+        return (
+          <SettingsRow
+            label="Visible Models"
+            description="Toggle models on/off in the dropdown"
+          >
+            <div className="w-[280px] space-y-0.5">
+              {visibleModelIds.map((m) => (
+                <div key={m} className="flex items-center gap-2 text-[10px]">
+                  <Switch
+                    checked={!hiddenModels.includes(m)}
+                    onCheckedChange={(v) => {
+                      const next = v
+                        ? hiddenModels.filter((h) => h !== m)
+                        : [...hiddenModels, m]
+                      void onSaveKey(provider.id, "hidden_models", next)
+                    }}
+                  />
+                  <span className="truncate font-mono text-muted-foreground">
+                    {m}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </SettingsRow>
+        )
+      })()}
     </SettingsSection>
   )
 }
