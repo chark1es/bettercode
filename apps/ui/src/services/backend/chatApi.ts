@@ -85,6 +85,11 @@ function canonicalProviderKind(value: string | null | undefined): string {
   // NOT "grok" — the hub CLI provider is distinct from the xAI API adapter.
   // (providerScopeKey already folds "grok_cli" to "grok-cli".)
   if (key === "grok-cli" || compactKey === "grokcli") return "grok-cli"
+  // Same family split for OpenCode: upstream `opencode-cli` is distinct from
+  // the BetterC0de compatibility kind ("opencode" / "open-code" compact to
+  // "opencode" and keep folding to it).
+  if (key === "opencode-cli" || compactKey === "opencodecli")
+    return "opencode-cli"
   return key
 }
 
@@ -921,6 +926,9 @@ export const sendChatMessage = async (
         "grok_cli",
         "grok-cli",
         "grokcli",
+        "opencode-cli",
+        "opencode_cli",
+        "opencodecli",
         "openrouter",
         "lmstudio",
       ])
