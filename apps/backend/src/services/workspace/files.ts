@@ -150,6 +150,11 @@ export function workspacePathIdentity(stat: Stats): WorkspacePathIdentity {
   }
 }
 
+/** A path spelling with case and Unicode normalization folded away. */
+function foldPathSpelling(value: string): string {
+  return value.normalize("NFC").toLowerCase()
+}
+
 export function sameWorkspacePathIdentity(
   left: WorkspacePathIdentity,
   right: WorkspacePathIdentity
@@ -351,7 +356,10 @@ export async function readWorkspaceFile(
   options: { expectedCanonicalRoot?: string } = {}
 ): Promise<{ content: Buffer; path: string }> {
   const { root, target } = await resolveWorkspaceOperationPath(cwd, relative)
-  if (options.expectedCanonicalRoot !== undefined && root !== options.expectedCanonicalRoot) {
+  if (
+    options.expectedCanonicalRoot !== undefined &&
+    root !== options.expectedCanonicalRoot
+  ) {
     throw workspacePathChanged("workspace root changed before read")
   }
   const rootIdentity = workspacePathIdentity(await fs.lstat(root))
@@ -359,38 +367,71 @@ export async function readWorkspaceFile(
   if (!expected.isFile()) {
     throw Object.assign(new Error("not a regular file"), { statusCode: 400 })
   }
-  const handle = await fs.open(target, fsSync.constants.O_RDONLY | NO_FOLLOW_FLAG | (fsSync.constants.O_NONBLOCK ?? 0))
+  const handle = await fs.open(
+    target,
+    fsSync.constants.O_RDONLY |
+      NO_FOLLOW_FLAG |
+      (fsSync.constants.O_NONBLOCK ?? 0)
+  )
   try {
     const opened = await handle.stat()
-    if (!opened.isFile() || !sameWorkspacePathIdentity(workspacePathIdentity(expected), workspacePathIdentity(opened))) {
+    if (
+      !opened.isFile() ||
+      !sameWorkspacePathIdentity(
+        workspacePathIdentity(expected),
+        workspacePathIdentity(opened)
+      )
+    ) {
       throw workspacePathChanged("workspace file changed while opening")
     }
     // Recheck every ancestor after opening, and bind the final pathname to the
     // handle identity. Subsequent replacements cannot redirect handle.read().
     const checked = await resolveWorkspaceOperationPath(root, relative)
     const current = await fs.lstat(checked.target)
-    if (checked.root !== root || checked.target !== target ||
-        !sameWorkspacePathIdentity(rootIdentity, workspacePathIdentity(await fs.lstat(root))) ||
-        !sameWorkspacePathIdentity(workspacePathIdentity(opened), workspacePathIdentity(current))) {
+    if (
+      checked.root !== root ||
+      checked.target !== target ||
+      !sameWorkspacePathIdentity(
+        rootIdentity,
+        workspacePathIdentity(await fs.lstat(root))
+      ) ||
+      !sameWorkspacePathIdentity(
+        workspacePathIdentity(opened),
+        workspacePathIdentity(current)
+      )
+    ) {
       throw workspacePathChanged("workspace path changed while opening")
     }
     if (opened.size > maxBytes) {
-      throw Object.assign(new Error("file exceeds the read size limit"), { statusCode: 413 })
+      throw Object.assign(new Error("file exceeds the read size limit"), {
+        statusCode: 413,
+      })
     }
     // One extra byte detects growth without allowing readFile() to allocate
     // indefinitely when another process appends to the file.
     const content = Buffer.alloc(opened.size + 1)
     let length = 0
     while (length < content.length) {
-      const { bytesRead } = await handle.read(content, length, Math.min(64 * 1024, content.length - length), length)
+      const { bytesRead } = await handle.read(
+        content,
+        length,
+        Math.min(64 * 1024, content.length - length),
+        length
+      )
       if (bytesRead === 0) break
       length += bytesRead
     }
     const after = await handle.stat()
     if (length > maxBytes || after.size > maxBytes) {
-      throw Object.assign(new Error("file exceeds the read size limit"), { statusCode: 413 })
+      throw Object.assign(new Error("file exceeds the read size limit"), {
+        statusCode: 413,
+      })
     }
-    if (length !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) {
+    if (
+      length !== opened.size ||
+      after.size !== opened.size ||
+      after.mtimeMs !== opened.mtimeMs
+    ) {
       throw workspacePathChanged("workspace file changed during read")
     }
     return { content: content.subarray(0, length), path: target }
@@ -401,27 +442,40 @@ export async function readWorkspaceFile(
 
 async function readPreview(input: ReadFileInput, maxBytes: number) {
   if (!input.relative_path) {
-    throw Object.assign(new Error("relative_path is required"), { statusCode: 400 })
+    throw Object.assign(new Error("relative_path is required"), {
+      statusCode: 400,
+    })
   }
   try {
     return await readWorkspaceFile(input.cwd, input.relative_path, maxBytes)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code
     if (code === "ENOENT" || code === "ENOTDIR") {
-      throw Object.assign(new Error("file not found"), { statusCode: 404, code })
+      throw Object.assign(new Error("file not found"), {
+        statusCode: 404,
+        code,
+      })
     }
     throw error
   }
 }
 
-export async function readFile(input: ReadFileInput): Promise<{ content: string; path: string }> {
+export async function readFile(
+  input: ReadFileInput
+): Promise<{ content: string; path: string }> {
   const result = await readPreview(input, TEXT_PREVIEW_MAX_BYTES)
   return { content: result.content.toString("utf8"), path: result.path }
 }
 
-export async function readBinaryFile(input: ReadFileInput): Promise<{ base64: string; path: string; size: number }> {
+export async function readBinaryFile(
+  input: ReadFileInput
+): Promise<{ base64: string; path: string; size: number }> {
   const result = await readPreview(input, BINARY_PREVIEW_MAX_BYTES)
-  return { base64: result.content.toString("base64"), path: result.path, size: result.content.length }
+  return {
+    base64: result.content.toString("base64"),
+    path: result.path,
+    size: result.content.length,
+  }
 }
 
 export async function writeFile(
@@ -614,18 +668,24 @@ export async function movePath(
     const to = path.join(targetParent.path, path.basename(unresolvedTo))
     const targetState = await captureWorkspaceTargetState(to)
 
-    // Explorer drops never imply replacing an existing entry. Retain case-only
-    // renames on Windows, where both spellings refer to the same entry.
+    // Explorer drops never imply replacing an existing entry. A case-only (or
+    // Unicode-normalization-only) rename is allowed wherever both spellings
+    // name the same entry: Windows, macOS (APFS is case-insensitive by
+    // default) and case-folded Linux directories. Comparing the spellings as
+    // well as the identity keeps a hard link to the same file a conflict.
     if (targetState.kind === "present") {
       if (from === to) return
-      const sameWindowsEntry = process.platform === "win32" &&
-        from.toLowerCase() === to.toLowerCase() &&
+      const sameEntryRespelled =
+        foldPathSpelling(from) === foldPathSpelling(to) &&
         sameWorkspacePathIdentity(targetState.identity, sourceState.identity)
-      if (!sameWindowsEntry) {
-        throw Object.assign(new Error("a file or folder already exists at the destination"), {
-          statusCode: 409,
-          code: "EEXIST",
-        })
+      if (!sameEntryRespelled) {
+        throw Object.assign(
+          new Error("a file or folder already exists at the destination"),
+          {
+            statusCode: 409,
+            code: "EEXIST",
+          }
+        )
       }
     }
 

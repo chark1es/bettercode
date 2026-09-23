@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { createRequire } from "node:module"
-import { access, appendFile, mkdtemp, readdir, stat } from "node:fs/promises"
+import { access, appendFile, mkdtemp, readdir, stat, writeFile } from "node:fs/promises"
 import { constants as fsConstants } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -17,17 +17,29 @@ const { listPackage } = require("@electron/asar")
 
 const root = path.resolve(import.meta.dirname, "..")
 const releaseDir = path.resolve(root, process.env.PACKAGE_RELEASE_DIR || "release")
+// PACKAGED_EXECUTABLE launches one specific binary (an installed app, an
+// AppImage) instead of searching release/ for the unpacked build.
+const explicitExecutable = process.env.PACKAGED_EXECUTABLE
+  ? path.resolve(process.env.PACKAGED_EXECUTABLE)
+  : null
+// Linux smoke runs pass --no-sandbox by default because an unpacked build's
+// chrome-sandbox is not setuid root. An installed .deb ships an AppArmor
+// profile and must start with the sandbox, the way users launch it.
+const keepLinuxSandbox = process.env.PACKAGED_SANDBOX === "1"
 const startupTimeoutMs = 30_000
 const stabilityWindowMs = 2_000
 const childExitTimeoutMs = 5_000
+const gracefulExitTimeoutMs = 10_000
 const taskkillTimeoutMs = 5_000
 const defaultBackendPorts = [3773, 3774, 3775, 3776]
-const packaged = await findPackagedApplication(releaseDir)
+const packaged = explicitExecutable
+  ? await describePackagedExecutable(explicitExecutable)
+  : await findPackagedApplication(releaseDir)
 let stdout = ""
 let stderr = ""
 let successMessage = null
 
-await validatePackageStructure(packaged)
+if (packaged.resourcesDir) await validatePackageStructure(packaged)
 
 const preexistingBackend = await findHealthyBackend(defaultBackendPorts)
 if (preexistingBackend) {
@@ -45,7 +57,7 @@ const args =
     ? [
         "-a",
         packaged.executable,
-        "--no-sandbox",
+        ...(keepLinuxSandbox ? [] : ["--no-sandbox"]),
         `--user-data-dir=${dataDir}`,
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
@@ -56,6 +68,7 @@ const args =
         "--remote-debugging-port=0",
       ]
 let child = null
+let appExitedOnItsOwn = false
 
 try {
   child = spawn(command, args, {
@@ -88,7 +101,10 @@ try {
   const health = await waitForPackagedReady(child, () => ({ stdout, stderr }))
   const renderer = await waitForRendererReady(child, () => ({ stdout, stderr }))
   await assertStableAfterReady(child, () => ({ stdout, stderr }))
-  await publishPrepackagedPath(packaged.packageRoot)
+  if (!explicitExecutable) {
+    await publishPrepackagedPath(packaged.packageRoot)
+    await writeSmokeResult(packaged)
+  }
   successMessage = `Packaged startup smoke passed: ${path.relative(root, packaged.executable)}; backend health ready on port ${health.port}; renderer mounted at ${renderer.url}.\n`
 } catch (error) {
   process.stderr.write(
@@ -99,16 +115,39 @@ try {
 } finally {
   const cleanupFailures = []
   if (child) {
+    // Quit the app itself first, the way a session shutdown does, while its
+    // display (Xvfb on Linux) is still up. Signalling only the launcher's
+    // process group tore the display down under the app and never reached
+    // the backend, which runs in its own group: on Linux CI the app, its
+    // crash handler and the backend all outlived the smoke, and the backend
+    // kept port 3773.
+    try {
+      await stopPackageProcesses(packaged)
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
     try {
       await stopChildTree(child)
     } catch (error) {
       cleanupFailures.push(error)
     }
+    // Anything that still holds the inherited stdout/stderr must not keep
+    // this script alive after the verdict.
+    child.stdout?.destroy()
+    child.stderr?.destroy()
   }
   try {
     await removeDirectoryWithRetries(dataDir)
   } catch (error) {
     cleanupFailures.push(error)
+  }
+  if (appExitedOnItsOwn) {
+    process.stdout.write(
+      `WARNING: the app exited on its own (code ${child?.exitCode ?? "null"}, signal ${child?.signalCode ?? "none"}) before the smoke stopped it. Its last output:\n${diagnosticTail()}\n`
+    )
+  }
+  if (cleanupFailures.length > 0) {
+    process.stderr.write(`Cleanup failed. The app's last output:\n${diagnosticTail()}\n`)
   }
   if (cleanupFailures.length === 1) throw cleanupFailures[0]
   if (cleanupFailures.length > 1) {
@@ -120,6 +159,30 @@ try {
 }
 
 if (successMessage) process.stdout.write(successMessage)
+
+async function describePackagedExecutable(executable) {
+  const executableStats = await stat(executable)
+  if (!executableStats.isFile()) {
+    throw new Error(`PACKAGED_EXECUTABLE is not a file: ${executable}`)
+  }
+  if (process.platform !== "win32") {
+    await access(executable, fsConstants.X_OK)
+  }
+  // An AppImage is a single self-mounting file; its app.asar only exists
+  // once the runtime has extracted it, so there is no structure to inspect.
+  if (/\.appimage$/i.test(executable)) {
+    return { executable, packageRoot: path.dirname(executable), resourcesDir: null }
+  }
+  const packageRoot = packagedRootForExecutable(executable)
+  return {
+    executable,
+    packageRoot,
+    resourcesDir:
+      process.platform === "darwin"
+        ? path.join(packageRoot, "Contents", "Resources")
+        : path.join(packageRoot, "resources"),
+  }
+}
 
 async function findPackagedApplication(directory) {
   const files = await walk(directory)
@@ -400,6 +463,104 @@ async function findHealthyBackend(ports) {
   return null
 }
 
+// release:check hands the verified unpacked build to the installer step
+// through this file; CI jobs use the GITHUB_OUTPUT value below.
+async function writeSmokeResult({ executable, packageRoot }) {
+  const outputFile = process.env.PACKAGED_SMOKE_OUTPUT
+  if (!outputFile) return
+  await writeFile(
+    outputFile,
+    `${JSON.stringify({ executable, packageRoot }, null, 2)}
+`,
+    "utf8"
+  )
+}
+
+/** Processes started from the package: the app, its helpers and backend. */
+function packageProcessIds({ packageRoot, executable }) {
+  const listing = spawnSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" })
+  if (listing.status !== 0) return []
+  const markers = [packageRoot, executable, "/tmp/appimage_extracted_", "/tmp/.mount_"]
+  const processes = []
+  for (const line of listing.stdout.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/)
+    if (!match) continue
+    const [, pid, args] = match
+    // The display server and its wrapper go last, after the app has quit.
+    if (/\bxvfb-run\b|\bXvfb\b/.test(args)) continue
+    if (Number(pid) === process.pid || args.includes("packaged-startup-smoke")) continue
+    if (markers.some((marker) => args.includes(marker))) {
+      processes.push({ pid: Number(pid), args: args.slice(0, 200) })
+    }
+  }
+  return processes
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === "EPERM"
+  }
+}
+
+function signalPids(pids, signal) {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, signal)
+    } catch {
+      // Exited between listing and signalling.
+    }
+  }
+}
+
+async function waitForPidsExit(pids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  let alive = pids.filter(isPidAlive)
+  while (alive.length > 0 && Date.now() < deadline) {
+    await delay(200)
+    alive = alive.filter(isPidAlive)
+  }
+  return alive
+}
+
+/**
+ * Quits the app the way a session shutdown does: SIGTERM to the main process
+ * only (renderer or GPU helpers killed first would raise the app's
+ * "renderer process gone" dialog), which then stops its helpers and backend.
+ * Whatever is still running after the graceful window is reported and
+ * killed; anything that survives SIGKILL fails the smoke, because the next
+ * launch would meet a stale backend.
+ */
+async function stopPackageProcesses(packaged) {
+  if (process.platform === "win32") return // taskkill /T covers the whole tree.
+  const mains = packageProcessIds(packaged).filter(
+    (entry) => entry.args.includes("--remote-debugging-port") && !entry.args.includes("--type=")
+  )
+  if (mains.length > 0) {
+    signalPids(mains.map((entry) => entry.pid), "SIGTERM")
+    const deadline = Date.now() + gracefulExitTimeoutMs
+    while (Date.now() < deadline && packageProcessIds(packaged).length > 0) {
+      await delay(200)
+    }
+  }
+
+  const remaining = packageProcessIds(packaged)
+  if (remaining.length === 0) return
+  process.stdout.write(
+    `WARNING: ${remaining.length} process(es) from the package were still running ${gracefulExitTimeoutMs / 1000}s after the app was asked to quit, and are being stopped:\n${remaining.map((entry) => `  ${entry.pid} ${entry.args}`).join("\n")}\n`
+  )
+  const pids = remaining.map((entry) => entry.pid)
+  signalPids(pids, "SIGTERM")
+  const stubborn = await waitForPidsExit(pids, childExitTimeoutMs)
+  signalPids(stubborn, "SIGKILL")
+  const survivors = await waitForPidsExit(stubborn, childExitTimeoutMs)
+  if (survivors.length > 0) {
+    throw new Error(`Processes from the package survived SIGKILL: ${survivors.join(", ")}`)
+  }
+}
+
 async function publishPrepackagedPath(packageRoot) {
   const outputFile = process.env.GITHUB_OUTPUT
   if (!outputFile) return
@@ -407,6 +568,11 @@ async function publishPrepackagedPath(packageRoot) {
     throw new Error("Prepackaged path contains an invalid newline.")
   }
   await appendFile(outputFile, `prepackaged-path=${packageRoot}\n`, "utf8")
+}
+
+function diagnosticTail() {
+  const text = `${stdout.trim()}\n${stderr.trim()}`.trim()
+  return text ? text.slice(-4_000) : "(no output)"
 }
 
 function appendDiagnosticTail(current, chunk) {
@@ -436,7 +602,18 @@ async function stopChildTree(processHandle) {
     throw new Error("Packaged application has no process ID for cleanup")
   }
   if (process.platform === "win32") {
-    await terminateWindowsChildTree(processHandle.pid)
+    try {
+      await terminateWindowsChildTree(processHandle.pid)
+    } catch (error) {
+      // taskkill exits 128 ("not found") when the app ended on its own between
+      // the last liveness check and the kill. Its tree is gone then; only a
+      // root that does not report its exit is a failure. A stale backend
+      // would still be caught by the next launch's port check.
+      if (error?.taskkillCode !== 128) throw error
+      await waitForChildExit(processHandle, childExitTimeoutMs)
+      appExitedOnItsOwn = true
+      return
+    }
     await waitForChildExit(processHandle, childExitTimeoutMs)
     return
   }
@@ -502,8 +679,11 @@ async function terminateWindowsChildTree(pid) {
         return
       }
       finish(
-        new Error(
-          `taskkill failed for packaged application pid ${pid} (code ${code ?? "null"}, signal ${signal ?? "none"})`
+        Object.assign(
+          new Error(
+            `taskkill failed for packaged application pid ${pid} (code ${code ?? "null"}, signal ${signal ?? "none"})`
+          ),
+          { taskkillCode: code }
         )
       )
     })
