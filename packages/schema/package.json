@@ -51,6 +51,76 @@
       "types": "./src/json-read.ts",
       "import": "./src/json-read.ts",
       "default": "./dist/json-read.js"
+    },
+    "./remote-protocol": {
+      "types": "./src/remote-protocol.ts",
+      "import": "./src/remote-protocol.ts",
+      "default": "./dist/remote-protocol.js"
+    },
+    "./activity-tools": {
+      "types": "./src/activity-tools.ts",
+      "import": "./src/activity-tools.ts",
+      "default": "./dist/activity-tools.js"
+    },
+    "./provider-label": {
+      "types": "./src/provider-label.ts",
+      "import": "./src/provider-label.ts",
+      "default": "./dist/provider-label.js"
+    },
+    "./thread-metadata": {
+      "types": "./src/thread-metadata.ts",
+      "import": "./src/thread-metadata.ts",
+      "default": "./dist/thread-metadata.js"
+    },
+    "./always-allow": {
+      "types": "./src/always-allow.ts",
+      "import": "./src/always-allow.ts",
+      "default": "./dist/always-allow.js"
+    },
+    "./chat-controls": {
+      "types": "./src/chat-controls.ts",
+      "import": "./src/chat-controls.ts",
+      "default": "./dist/chat-controls.js"
+    },
+    "./message-queue": {
+      "types": "./src/message-queue.ts",
+      "import": "./src/message-queue.ts",
+      "default": "./dist/message-queue.js"
+    },
+    "./chat-attachment": {
+      "types": "./src/chat-attachment.ts",
+      "import": "./src/chat-attachment.ts",
+      "default": "./dist/chat-attachment.js"
+    },
+    "./system-instruction": {
+      "types": "./src/system-instruction.ts",
+      "import": "./src/system-instruction.ts",
+      "default": "./dist/system-instruction.js"
+    },
+    "./prompt-context": {
+      "types": "./src/prompt-context.ts",
+      "import": "./src/prompt-context.ts",
+      "default": "./dist/prompt-context.js"
+    },
+    "./runtime-hooks": {
+      "types": "./src/runtime-hooks.ts",
+      "import": "./src/runtime-hooks.ts",
+      "default": "./dist/runtime-hooks.js"
+    },
+    "./git-diff": {
+      "types": "./src/git-diff.ts",
+      "import": "./src/git-diff.ts",
+      "default": "./dist/git-diff.js"
+    },
+    "./git-commit-message": {
+      "types": "./src/git-commit-message.ts",
+      "import": "./src/git-commit-message.ts",
+      "default": "./dist/git-commit-message.js"
+    },
+    "./remote-terminal": {
+      "types": "./src/remote-terminal.ts",
+      "import": "./src/remote-terminal.ts",
+      "default": "./dist/remote-terminal.js"
     }
   },
   "scripts": {
@@ -74,6 +144,21 @@
       ],
       "json-read": [
         "dist/json-read.d.ts"
+      ],
+      "remote-protocol": [
+        "dist/remote-protocol.d.ts"
+      ],
+      "remote-terminal": [
+        "dist/remote-terminal.d.ts"
+      ],
+      "prompt-context": [
+        "dist/prompt-context.d.ts"
+      ],
+      "runtime-hooks": [
+        "dist/runtime-hooks.d.ts"
+      ],
+      "system-instruction": [
+        "dist/system-instruction.d.ts"
       ]
     }
   }

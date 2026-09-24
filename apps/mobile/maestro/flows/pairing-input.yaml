@@ -1,0 +1,42 @@
+# A bare pairing code is refused before anything is sent: the app needs
+# the desktop's address with it.
+appId: com.betterc0de.remote
+name: Pairing checks the input before it connects
+tags:
+  - pairing
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: pair-screen
+    timeout: 60000
+- tapOn:
+    id: pair-manual-tab
+- tapOn:
+    id: pair-input
+- inputText: ABCD-EFGH-JKLM
+# On Android the form moves above the keyboard, and Connect is reached with
+# the keyboard open (Maestro counts what the keyboard covers as not visible
+# there). Maestro cannot hide the iOS keyboard, which covers Connect; Return
+# ends editing in this single-line field instead.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: pair-connect
+          direction: DOWN
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - pressKey: Enter
+- tapOn:
+    id: pair-connect
+- extendedWaitUntil:
+    visible:
+      id: pair-error
+    timeout: 10000
+- assertVisible: A bare code also needs the desktop address.

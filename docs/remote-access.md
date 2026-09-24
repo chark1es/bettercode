@@ -43,20 +43,91 @@ provides touch-native screens for:
 
 - searching, opening, creating, and continuing desktop-hosted chats;
 - live assistant and reasoning streams with reconnect replay;
-- model selection, stop controls, tool/plan approvals, and provider questions;
-- project browsing plus chat-scoped files, text previews, diffs, and checkpoints;
+- model selection, the desktop's permission presets and chat modes per chat,
+  stop controls, tool/plan approvals, and provider questions;
+- a queue for messages written while the agent works, and **Retry** for a
+  message that did not arrive, which the desktop recognises, so a retried
+  message never runs twice;
+- which chats wait for an answer (in the chat list, on the **Chats** tab and
+  in every other chat), kept current as approvals are answered on the
+  desktop, and the agent's tool steps while it works;
+- renaming a chat, which the desktop and every other paired device take over
+  at once (`POST /api/v1/threads/:id/title`, announced as the
+  `threads.rename` feature and sent to clients as a `thread.metadata`
+  frame), and deleting one, which also removes its worktree on the desktop,
+  with any changes there that are not committed;
+- starting a chat in its own git worktree, on a new branch from a branch the
+  phone lists, and restoring a checkpoint: the chat and the whole project
+  folder return to the end of an earlier turn, after the desktop's warning
+  of what that discards;
+- photos in a message, from the photo library or the camera. Like the
+  desktop's attachments they travel inside the message, to the paired desktop
+  only. The phone encodes each photo again as a JPEG of at most 1568 pixels
+  on its long edge, which leaves out the camera's metadata, location
+  included, and keeps a message within the desktop's request limit (2 MB).
+  Whether the agent sees them depends on the provider, as on the desktop:
+  Claude Code gets only their names, for now;
+- source control for a chat's folder or a project, like the desktop's git
+  panel: status, staging and unstaging files or single changes, discarding,
+  commits with a message the desktop generates, fetch, pull, push and
+  publishing a branch, switching and creating branches, and the latest
+  commits. A read-only session gets none: the desktop refuses every git
+  request from it;
+- project browsing plus chat-scoped files, text previews, diffs (in full,
+  file by file), and checkpoints; new files and folders, renaming and
+  deleting (a new file is never written over an existing one), and a search
+  of the files' text with the desktop's options;
+- editing files up to 1 MB in a code editor. A save names the version it was
+  made on (`expectedSha256`), so the desktop refuses it when the file changed
+  meanwhile, and the phone offers to compare, take the desktop's version or
+  overwrite it. The editor runs in a WebView that loads nothing from the
+  network;
+- a terminal in a chat's folder, when the desktop allows paired devices one
+  (see [Terminals for paired devices](#terminals-for-paired-devices)): the
+  desktop's shell for that folder, with a row of the keys a phone keyboard
+  lacks (Esc, Tab, Ctrl and Alt, arrows, Home/End, Page Up/Down). It keeps
+  running when the phone loses its connection, and the phone picks up where
+  it left off;
 - host health, session identity, expiry, and self-revocation.
 
-Start it from the repository root with `npm run mobile:start`, then open it in
-Expo Go or a development build. Use **Pairing-QR scannen** inside the app; the
-existing desktop QR works for both the browser and native client. Manual entry
-also accepts the LAN host and short code separately.
+The desktop prepares a message from the phone as it prepares its own (the
+phone asks for it with `prepareTurn`, and desktops that do announce
+`chat.preparedTurns`):
+
+- Your **on message send** hooks run first, in order. One that fails stops
+  the message, and the phone shows the hook and what it printed
+  (`message_hook_failed`). A `/goal` command runs them once, not for each
+  of the goal's turns. The hook's last run, as the desktop's hook settings
+  show it, is recorded only for messages sent on the desktop.
+- The turn gets the system instruction the desktop builds: the mode and
+  permission preset, the project, your skills, MCP servers and subagents
+  and the project's own, the project's permission rules, and your rules and
+  the project's rule files.
+
+Build and start a development build from the repository root (see
+[apps/mobile/README.md](../apps/mobile/README.md)).
+Use **Scan QR** inside the app; the existing desktop QR works for both the
+browser and native client. **Enter manually** also accepts the LAN host and
+short code separately.
 
 The native client exchanges the one-time code at the dedicated mobile pairing
 endpoint. The returned opaque bearer is stored with iOS Keychain/Android
 Keystore via Expo SecureStore and sent only to the paired host. It authenticates
 both HTTP requests and the in-band WebSocket handshake. Browser pairing remains
 cookie-only and never exposes its session token to page JavaScript.
+
+### Plain HTTP on the phone
+
+Direct connections on a private network or tailnet use plain HTTP (see
+[Choosing an endpoint](#choosing-an-endpoint)), so the app has to allow it:
+
+| Platform | What the app allows | Why |
+| --- | --- | --- |
+| iOS | Plain HTTP to IP addresses, `.local` and single-label host names (`NSAllowsLocalNetworking`), and to Tailscale MagicDNS names under `ts.net`. HTTPS everywhere. | iOS App Transport Security does not apply to IP addresses, and the local-networking key covers local names. Other plain-HTTP host names, such as `desktop.fritz.box`, are refused by iOS; use the desktop's IP address or HTTPS instead. |
+| Android | Plain HTTP to any address (`usesCleartextTraffic`). | Android's network security configuration can allow host names but not address ranges, and the desktop's LAN or Tailscale IP is not known when the app is built. |
+
+The app itself only ever connects to the desktop it was paired with, using the
+addresses that desktop advertised.
 
 ## Choosing an endpoint
 
@@ -187,21 +258,127 @@ sessions.
 
 ## Managing devices
 
-The **Paired devices** list shows each browser label and last activity. Use the
-trash action to revoke one device, or **Revoke all** to invalidate all remote
-sessions. Disabling Remote Access revokes every paired device at once and
+The **Paired devices** list shows each browser label and last activity, and
+how many terminals a device runs, with **Close terminals** to end them while
+the device stays paired. Use the trash action to revoke one device, or
+**Revoke all** to invalidate all remote sessions. Disabling Remote Access revokes every paired device at once and
 closes network listening after the backend restart; re-enabling it later
-means pairing each device again. Terminal and file access for paired devices
-is a separate switch, and a paired device can change neither switch, nor any
-setting that makes the desktop run something (MCP servers, hooks, skills,
-pipelines, rules, guardrails, provider credentials, workspace auto-trust,
-backend logging): those return 403 to a remote session.
+means pairing each device again. A terminal for paired devices is a separate
+switch, **Allow terminal from remote devices**, which is off by default. A
+paired device can change neither that switch nor any setting that makes the
+desktop run something (MCP servers, hooks, skills, pipelines, rules,
+guardrails, provider credentials, workspace auto-trust, backend logging):
+those return 403 to a remote session.
 
 A **full** session (HTTPS, loopback, private network, tailnet) can operate
-the chats and workspaces the host exposes, including terminal and file
-operations. An **opt-in public plaintext** session cannot; it is
-monitoring-only. Pair only devices you control, revoke
-lost devices promptly, and do not post pairing links in shared channels.
+the chats and workspaces the host exposes, including reading and changing
+files, and a terminal when the switch above is on. There is no separate switch
+for file access. Like the desktop, it can choose any permission preset for a
+chat, including **Bypass Permission**, under which the agent runs commands and
+edits files without asking; the phone app shows the desktop's warning before
+it switches. The preset travels with each message the device sends. It can
+also answer a tool approval with **Always allow** for this session, this
+project or all projects, as the desktop can; the app shows the exact rule
+before it is stored. Such a rule is stored on the desktop: it stays after the
+device is signed out or revoked, until it is removed on the desktop. An
+**opt-in public plaintext** session cannot do any of this; it is
+monitoring-only. Pair only devices you control, revoke lost devices promptly,
+and do not post pairing links in shared channels.
+
+## Terminals for paired devices
+
+A paired device gets a terminal only:
+
+- while **Allow terminal from remote devices** is on (off by default);
+- with a full session (a read-only session gets none);
+- in a folder the desktop knows as a workspace: a project's folder or a
+  worktree.
+
+The terminal runs the desktop's shell for that folder. The desktop's own
+terminals are never shown on a device: what was typed in them, passwords
+included, would be readable there.
+
+A terminal ends when:
+
+- the device closes it;
+- no device was attached to it for 15 minutes;
+- the switch is turned off (every device's terminals end, and the phone says
+  why);
+- the device is revoked or signs out;
+- someone chooses **Close terminals** for the device in **Paired devices**.
+
+The desktop's log records which device opened a terminal in which folder,
+and when and why it ended, never what was typed or shown.
+
+How it works, for developers (`packages/schema/src/remote-terminal.ts`,
+announced as the `terminal.ws` feature):
+
+- The phone app talks to the terminal over its WebSocket (`/ws`), with calls
+  (`terminal.open`, `attach`, `write`, `resize`, `ack`, `close`, `list`) and
+  frames from the desktop (`terminal.output`, `exit`, `gap`, `closed`). The
+  authenticated connection is the authorization: every call is checked
+  against the device's session, its access level and the switch.
+- Output is numbered. The desktop sends at most 256 KB ahead of what the
+  device acknowledged and keeps the rest in the terminal's buffer. Output the
+  buffer had to drop is announced as a gap, never skipped silently. After a
+  lost connection the device attaches again after the last output it has.
+- Input is numbered too, and each number is applied once and in order, so a
+  write sent again after a lost connection does not run twice.
+- The shell routes (`/api/v1/shell/*`) remain, for the desktop's renderer
+  and paired browsers: there, each input needs the one-shot capability
+  described under [Pairing and sessions](#pairing-and-sessions). The same
+  switch governs both ways, and **Close terminals** ends both.
+
+## Phone app and desktop versions
+
+The phone app and the desktop update separately, so a paired phone can run an
+older or newer release than the desktop. They check that they understand each
+other on every connection:
+
+- `/api/v1/remote/bootstrap`, the pairing response and the WebSocket `auth_ok`
+  frame carry a `protocol` block: the desktop's protocol version
+  (`apiVersion`), the oldest phone app it serves (`minClientVersion`) and, for
+  a paired device, what this desktop offers it (`capabilities`: access level,
+  whether a terminal is allowed, the largest request, and additive
+  `features`). The desktop sends the block again (`protocol_update`) when the
+  terminal switch changes.
+- The phone app names itself on every request with
+  `X-BetterC0de-Client: betterc0de-remote/<version> (<platform>)`, and in the
+  WebSocket `auth` frame. **Paired devices** shows each phone's app and
+  version.
+- An app below the minimum gets `426` with `code: "client_update_required"`
+  (HTTP) or close code `4426` (WebSocket). Its pairing stays valid; the app
+  asks for an update instead of pairing again. Signing out still works.
+
+Every refusal a paired device can receive carries a `code`:
+
+| Status | `code` | Meaning |
+| --- | --- | --- |
+| 401 | `unauthorized` | The session is unknown, expired or revoked; pair again. |
+| 401 | `pairing_code_invalid` | The one-time code was already used or has expired. |
+| 403 | `remote_access_disabled` | Remote access is turned off on the desktop. |
+| 403 | `remote_read_only` | A read-only session tried to change something. |
+| 403 | `desktop_only` | Only the desktop itself may use this endpoint. |
+| 403 | `remote_terminal_disabled` | The terminal is not allowed for paired devices. |
+| 413 | `request_too_large` | The request is larger than `capabilities.maxRequestBytes`. |
+| 426 | `secure_transport_required` | Plain HTTP from a public address. |
+| 426 | `client_update_required` | The phone app is older than `minClientVersion`. |
+| 429 | `rate_limited` | Too many requests; wait for `Retry-After`. |
+
+Source control answers with the desktop's own words and these codes:
+`git_nothing_to_commit` (400, nothing staged and nothing to stage),
+`git_hunk_conflict` (409, the change is no longer in the diff),
+`git_remote_error` (400 to 409, push, pull or fetch refused: no remote, no
+upstream, authentication, the remote is ahead, local changes in the way) and
+`commit_generation_unavailable` (422, no Codex or Claude CLI could write the
+message).
+
+Developers: `packages/schema/src/remote-protocol.ts` defines the block. Raise
+`REMOTE_API_VERSION` only for a change an installed app cannot handle (a
+removed or renamed field, a new value in a response enum, different auth or
+semantics) and announce additive changes in `capabilities.features`. A
+snapshot test (`apps/backend/src/http/remote-contract-snapshot.test.ts`) fails
+on every change to a response contract the phone app compiles in.
 
 ## Troubleshooting
 

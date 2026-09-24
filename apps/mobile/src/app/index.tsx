@@ -2,17 +2,22 @@ import { ActivityIndicator, StyleSheet, Text, View } from "react-native"
 import { Redirect } from "expo-router"
 import { BrandMark, Screen } from "@/components/layout"
 import { colors, font, spacing } from "@/design/theme"
+import { needsUpdate } from "@/lib/compat"
 import { useSessionStore } from "@/store/session-store"
 
 /**
  * Startup gate: brand mark + quiet spinner while the stored session is
- * hydrated from the keychain and the desktop host is health-checked, then a
- * redirect to the tabs (paired) or the pairing flow (not paired).
+ * hydrated from the keychain and the desktop host is health-checked, then
+ * on to the tabs (paired), the update screen (app or desktop too old) or the
+ * pairing flow (not paired).
  */
 export default function IndexScreen() {
   const state = useSessionStore((store) => store.state)
   const profile = useSessionStore((store) => store.profile)
-  if (state === "hydrating" || state === "checking") {
+  const updateRequired = useSessionStore((store) =>
+    needsUpdate(store.compatibility)
+  )
+  if (state === "hydrating" || (state === "checking" && !profile)) {
     return (
       <Screen edges={["top", "bottom"]}>
         <View style={styles.wrap}>
@@ -29,7 +34,8 @@ export default function IndexScreen() {
       </Screen>
     )
   }
-  return <Redirect href={profile ? "/(tabs)" : "/pair"} />
+  if (!profile) return <Redirect href="/pair" />
+  return <Redirect href={updateRequired ? "/update-required" : "/(tabs)"} />
 }
 
 const styles = StyleSheet.create({

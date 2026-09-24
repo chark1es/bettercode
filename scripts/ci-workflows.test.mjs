@@ -5,7 +5,15 @@ import test from "node:test"
 
 import YAML from "yaml"
 
+import { DEFAULT_AVD, MINIMUM_XCODE, androidRequirements } from "./mobile-toolchain.mjs"
+
 const root = path.resolve(import.meta.dirname, "..")
+
+function readWorkflow(name) {
+  return YAML.parse(fs.readFileSync(path.join(root, ".github", "workflows", name), "utf8"))
+}
+
+const runs = (job) => job.steps.map((step) => step.run ?? step.with?.script).filter(Boolean)
 
 function workflowFiles() {
   const files = []
@@ -65,10 +73,103 @@ test("CI and release run release:check on Linux, Windows and both Mac architectu
   }
 })
 
-test("publishing waits for every platform and the Node compatibility leg", () => {
+test("macOS legs turn off Spotlight before release:check builds the DMG", () => {
+  for (const name of ["ci.yml", "release.yml"]) {
+    const workflow = YAML.parse(fs.readFileSync(path.join(root, ".github", "workflows", name), "utf8"))
+    const steps = workflow.jobs["release-check"].steps
+    const spotlight = steps.findIndex((step) => step.run === "sudo mdutil -a -i off")
+    assert.notEqual(spotlight, -1, `${name} turns off Spotlight`)
+    assert.equal(steps[spotlight].if, "runner.os == 'macOS'", name)
+    const check = steps.findIndex((step) => String(step.run ?? "").startsWith("npm run release:check"))
+    assert.ok(spotlight < check, `${name} turns it off before release:check`)
+  }
+})
+
+test("Windows legs keep Defender out of the checkout and the temp folders", () => {
+  const prepare = YAML.parse(fs.readFileSync(path.join(root, ".github", "actions", "prepare", "action.yml"), "utf8"))
+  const step = prepare.runs.steps.find((candidate) => String(candidate.run ?? "").includes("Add-MpPreference"))
+  assert.ok(step, "the prepare action excludes the work folders from Defender")
+  assert.equal(step.if, "runner.os == 'Windows'")
+  for (const folder of ["GITHUB_WORKSPACE", "RUNNER_TEMP", "env:TEMP", "LOCALAPPDATA"]) {
+    assert.match(step.run, new RegExp(folder), `it excludes ${folder}`)
+  }
+  // An image without Defender warns instead of failing the job.
+  assert.match(step.run, /::warning::/)
+})
+
+test("publishing waits for every platform, the Node compatibility leg and the phone app", () => {
   const release = YAML.parse(fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8"))
-  assert.deepEqual(release.jobs.publish.needs.sort(), ["node-compat", "release-check", "tag"])
+  assert.deepEqual(release.jobs.publish.needs.sort(), [
+    "mobile-android",
+    "mobile-ios",
+    "node-compat",
+    "release-check",
+    "tag",
+  ])
+  // A phone app job that is switched off is skipped and must not block the
+  // desktop release; a failed one must.
+  assert.match(release.jobs.publish.if, /!failure\(\)/)
+  assert.match(release.jobs.publish.if, /!cancelled\(\)/)
   assert.equal(release.jobs["release-check"].strategy["fail-fast"], false)
   assert.deepEqual(release.permissions, { contents: "read" })
   assert.deepEqual(release.jobs.publish.permissions, { contents: "write" })
+})
+
+test("the phone app joins releases only when switched on, and only tags reach its secrets", () => {
+  const source = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8")
+  const release = YAML.parse(source)
+  for (const name of ["mobile-android", "mobile-ios", "testflight"]) {
+    assert.match(release.jobs[name].if, /vars\.BETTERC0DE_MOBILE_RELEASE == 'true'/, name)
+  }
+  const signing = Object.entries(release.jobs)
+    .filter(([, job]) => job.environment === "release")
+    .map(([name]) => name)
+    .sort()
+  assert.deepEqual(signing, ["mobile-android", "testflight"])
+  for (const name of signing) assert.match(release.jobs[name].if, /startsWith\(github\.ref, 'refs\/tags\/v'\)/, name)
+  // Secrets appear only in the jobs of the release environment.
+  for (const [name, job] of Object.entries(release.jobs)) {
+    if (job.environment === "release") continue
+    assert.doesNotMatch(JSON.stringify(job), /secrets\./, `${name} reads a secret outside the release environment`)
+  }
+  assert.equal(release.jobs.testflight.needs, "publish")
+  assert.deepEqual(runs(release.jobs["mobile-android"]).filter((run) => run.includes("mobile-android.mjs")), [
+    "node scripts/mobile-android.mjs build --signing release",
+    "node scripts/mobile-android.mjs e2e",
+  ])
+  const assemble = release.jobs.publish.steps.find((step) => step.name === "Assemble and verify the release")
+  assert.match(assemble.env.ANDROID, /BETTERC0DE_MOBILE_RELEASE == 'true' && '--android'/)
+  assert.match(assemble.run, /release:assemble -- artifacts dist-release \$ANDROID/)
+})
+
+test("the desktop legs leave the phone app to its own jobs", () => {
+  for (const name of ["ci.yml", "release.yml"]) {
+    const command = runs(readWorkflow(name).jobs["release-check"]).find((run) => run.includes("release:check"))
+    assert.match(command, /--mobile none\b/, name)
+  }
+})
+
+test("CI builds the phone app and runs its device tests on Android and iOS", () => {
+  const ci = readWorkflow("ci.yml")
+  const android = ci.jobs["mobile-android"]
+  assert.equal(android["runs-on"], "ubuntu-24.04")
+  assert.deepEqual(runs(android).filter((run) => run.includes("mobile-android.mjs")), [
+    "node scripts/mobile-android.mjs build --signing test-key",
+    "node scripts/mobile-android.mjs e2e",
+  ])
+  const emulator = android.steps.find((step) => step.uses?.startsWith("reactivecircus/android-emulator-runner@"))
+  assert.equal(emulator.with["api-level"], androidRequirements().targetSdk, "the emulator runs the app's targetSdk")
+  assert.equal(emulator.with.arch, "x86_64")
+  assert.equal(emulator.with["avd-name"], DEFAULT_AVD, "the device tests only use the test AVD")
+
+  const ios = ci.jobs["mobile-ios"]
+  assert.match(ios["runs-on"], /^macos-\d+$/)
+  assert.deepEqual(runs(ios).filter((run) => run.includes("mobile-ios.mjs")), ["node scripts/mobile-ios.mjs all"])
+  const xcode = /Xcode_(\d+)\.[\d.]+\.app/.exec(ios.env.DEVELOPER_DIR)
+  assert.ok(xcode && Number(xcode[1]) >= MINIMUM_XCODE, `iOS builds need Xcode ${MINIMUM_XCODE}+`)
+})
+
+test("CI uses no secrets, so pull requests from forks run everything", () => {
+  const source = fs.readFileSync(path.join(root, ".github", "workflows", "ci.yml"), "utf8")
+  assert.doesNotMatch(source, /secrets\./)
 })

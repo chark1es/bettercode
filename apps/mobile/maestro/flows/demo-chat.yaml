@@ -1,0 +1,93 @@
+# The demo, as App Review sees it: start it from the pairing screen, open a
+# chat, send a message, approve the agent's request, read the reply, and
+# leave the demo from the Host tab.
+#
+# Every target is scrolled to before it is used: on a small phone (and the
+# CI emulator's 320x640 screen) "Try the demo", the approval and Exit demo
+# start below the fold.
+appId: com.betterc0de.remote
+name: The demo from the pairing screen to Exit demo
+tags:
+  - demo
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: pair-screen
+    timeout: 60000
+- scrollUntilVisible:
+    element:
+      id: pair-demo
+    direction: DOWN
+- tapOn:
+    id: pair-demo
+- extendedWaitUntil:
+    visible:
+      id: chats-screen
+    timeout: 20000
+- assertVisible:
+    id: connection-demo
+- scrollUntilVisible:
+    element:
+      id: thread-row-demo-release-notes
+    direction: DOWN
+- tapOn:
+    id: thread-row-demo-release-notes
+- tapOn:
+    id: chat-input
+- inputText: Draft the release notes
+# Sent with the keyboard open, as a user sends: the send button sits above
+# the keyboard (CI's Android emulator keeps its keyboard 0 px tall).
+- tapOn:
+    id: chat-send
+# The keyboard stays open after sending, and while it is up the chat's first
+# tap only closes it (React Native's default for a list). So it is closed
+# first, as a user would:
+# - on Android with the back key: hideKeyboard sends it, and the keyboard,
+#   0 px tall on CI's emulator too, takes it. The message box keeps its
+#   focus after Send, so the back key never leaves the chat. On a small
+#   screen the sent message has scrolled away by then, so it cannot be
+#   tapped instead;
+# - on iOS, which offers no key that hides this multiline input's keyboard,
+#   by a tap on the sent message, which does nothing else. The keyboard also
+#   covers the approval card there, whose buttons Maestro still counts as
+#   visible (the keyboard is another window).
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: Draft the release notes
+- scrollUntilVisible:
+    element:
+      id: request-approve
+    direction: DOWN
+    timeout: 30000
+- assertVisible: Run npm test
+- tapOn:
+    id: request-approve
+- scrollUntilVisible:
+    element: .*24 passed.*
+    direction: DOWN
+    timeout: 30000
+- assertNotVisible:
+    id: request-approve
+- tapOn: Back
+# By id: iOS reads the tab as "Host, tab, 3 of 3".
+- tapOn:
+    id: tab-host
+- scrollUntilVisible:
+    element:
+      id: exit-demo
+    direction: DOWN
+- tapOn:
+    id: exit-demo
+- extendedWaitUntil:
+    visible:
+      id: pair-screen
+    timeout: 20000

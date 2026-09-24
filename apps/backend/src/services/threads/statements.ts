@@ -5,7 +5,11 @@ import type { Db } from "../../persistence/db"
 // binding is looked up per page row through
 // idx_provider_bindings_thread_updated, so nothing scales with the
 // number of bindings or threads outside the page.
-const threadPageSql = (cursor: boolean) => `
+/**
+ * Thread summaries (list rows) with their latest provider session binding:
+ * the newest page, the page before a cursor, or one thread by id.
+ */
+const threadPageSql = (filter: "newest" | "before" | "id") => `
   SELECT
     thread.thread_id,
     thread.project_id,
@@ -44,7 +48,8 @@ const threadPageSql = (cursor: boolean) => `
   FROM (
     SELECT * FROM projection_threads
     WHERE status = 'active'
-      ${cursor ? "AND (updated_at, thread_id) < (?, ?)" : ""}
+      ${filter === "before" ? "AND (updated_at, thread_id) < (?, ?)" : ""}
+      ${filter === "id" ? "AND thread_id = ?" : ""}
     ORDER BY updated_at DESC, thread_id DESC
     LIMIT ?
   ) AS thread
@@ -65,7 +70,9 @@ const threadPageSql = (cursor: boolean) => `
  */
 export function prepareThreadStatements(db: Db) {
   return {
-    statsRevisionStmt: db.prepare("SELECT version FROM backend_read_revisions WHERE name = 'stats'"),
+    statsRevisionStmt: db.prepare(
+      "SELECT version FROM backend_read_revisions WHERE name = 'stats'"
+    ),
     upsertThreadStmt: db.prepare(`
       INSERT INTO projection_threads
         (thread_id, project_id, title, status, env_mode, created_at, updated_at, message_count, turn_count, project_path, codex_thread_id)
@@ -184,7 +191,9 @@ export function prepareThreadStatements(db: Db) {
     findRuntimeSequenceStmt: db.prepare(`
       SELECT thread_id, role, runtime_sequence FROM projection_message_usage WHERE message_id = ?
     `),
-    touchThreadStmt: db.prepare("UPDATE projection_threads SET updated_at = ? WHERE thread_id = ?"),
+    touchThreadStmt: db.prepare(
+      "UPDATE projection_threads SET updated_at = ? WHERE thread_id = ?"
+    ),
     findDispatchMessageStmt: db.prepare(`
       SELECT thread_id, turn_id, role, content_json, created_at
       FROM projection_messages
@@ -449,8 +458,9 @@ export function prepareThreadStatements(db: Db) {
           )
       WHERE thread_id = ?
     `),
-    listThreadsStmt: db.prepare(threadPageSql(false)),
-    listThreadsBeforeStmt: db.prepare(threadPageSql(true)),
+    listThreadsStmt: db.prepare(threadPageSql("newest")),
+    listThreadsBeforeStmt: db.prepare(threadPageSql("before")),
+    getThreadSummaryStmt: db.prepare(threadPageSql("id")),
     listStatsThreadsStmt: db.prepare(`
       SELECT thread_id, project_path, created_at, updated_at
       FROM projection_threads

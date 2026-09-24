@@ -1,0 +1,93 @@
+# A chat's files in the demo: make a new file, then search the text of the
+# files and open a match at its line.
+#
+# Every target is scrolled to before it is used: on a small phone (and the
+# CI emulator's 320x640 screen) parts of the browser start below the fold.
+appId: com.betterc0de.remote
+name: A new file and a content search in the demo
+tags:
+  - demo
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: pair-screen
+    timeout: 60000
+- scrollUntilVisible:
+    element:
+      id: pair-demo
+    direction: DOWN
+- tapOn:
+    id: pair-demo
+- extendedWaitUntil:
+    visible:
+      id: chats-screen
+    timeout: 20000
+- scrollUntilVisible:
+    element:
+      id: thread-row-demo-dark-mode
+    direction: DOWN
+- tapOn:
+    id: thread-row-demo-dark-mode
+- tapOn:
+    id: chat-files
+- extendedWaitUntil:
+    visible:
+      id: file-row-src
+    timeout: 20000
+
+# The sheet's field has the keyboard; its card sits above it.
+- tapOn:
+    id: files-new
+- tapOn: New file
+# The field focuses itself. On iOS the keyboard moves the card up as it
+# comes, and a tap on the field where it was lands on the backdrop, which
+# closes the sheet (both iOS runs that had this flow failed there): iOS
+# waits for the card to settle and types into the focused field.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn:
+          id: rename-input
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible:
+            id: rename-input
+          timeout: 10000
+      - waitForAnimationToEnd:
+          timeout: 5000
+- inputText: Map.tsx
+- tapOn:
+    id: rename-save
+- scrollUntilVisible:
+    element:
+      id: file-row-Map\.tsx
+    direction: DOWN
+
+# A single-line search field closes the keyboard when it is submitted.
+- scrollUntilVisible:
+    element:
+      id: files-mode-contents
+    direction: UP
+- tapOn:
+    id: files-mode-contents
+- tapOn:
+    id: files-search
+- inputText: background
+- pressKey: Enter
+- scrollUntilVisible:
+    element:
+      id: search-match-src/theme\.ts-2
+    direction: DOWN
+    timeout: 20000
+- tapOn:
+    id: search-match-src/theme\.ts-2
+- extendedWaitUntil:
+    visible:
+      id: file-target-line
+    timeout: 20000

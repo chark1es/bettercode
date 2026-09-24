@@ -1,4 +1,4 @@
-import { Redirect, Tabs } from "expo-router"
+import { Tabs } from "expo-router"
 import { StyleSheet, View } from "react-native"
 import {
   FolderGit2,
@@ -8,7 +8,7 @@ import {
 import type { LucideProps } from "lucide-react-native"
 import type { ComponentType } from "react"
 import { colors, font, radius } from "@/design/theme"
-import { useSessionStore } from "@/store/session-store"
+import { useAppStore } from "@/store/app-store"
 
 /**
  * Bottom tab bar in the desktop chrome style: sidebar-colored bar with a
@@ -33,11 +33,12 @@ function TabIcon({
 }
 
 export default function TabsLayout() {
-  const profile = useSessionStore((state) => state.profile)
-  const state = useSessionStore((store) => store.state)
-  if (!profile && state !== "hydrating" && state !== "checking") {
-    return <Redirect href="/pair" />
-  }
+  const waiting = useAppStore(
+    (state) =>
+      Object.values(state.requestsByThread).filter(
+        (requests) => requests.length > 0
+      ).length
+  )
   return (
     <Tabs
       screenOptions={{
@@ -64,6 +65,10 @@ export default function TabsLayout() {
         name="index"
         options={{
           title: "Chats",
+          tabBarBadge: waiting > 0 ? waiting : undefined,
+          tabBarBadgeStyle: styles.badge,
+          // iOS names a tab "Chats, tab, 1 of 3"; tests find it by id.
+          tabBarButtonTestID: "tab-chats",
           tabBarIcon: ({ color, focused }) => (
             <TabIcon icon={MessagesSquare} color={color} focused={focused} />
           ),
@@ -73,6 +78,7 @@ export default function TabsLayout() {
         name="projects"
         options={{
           title: "Projects",
+          tabBarButtonTestID: "tab-projects",
           tabBarIcon: ({ color, focused }) => (
             <TabIcon icon={FolderGit2} color={color} focused={focused} />
           ),
@@ -82,12 +88,9 @@ export default function TabsLayout() {
         name="settings"
         options={{
           title: "Host",
+          tabBarButtonTestID: "tab-host",
           tabBarIcon: ({ color, focused }) => (
-            <TabIcon
-              icon={MonitorSmartphone}
-              color={color}
-              focused={focused}
-            />
+            <TabIcon icon={MonitorSmartphone} color={color} focused={focused} />
           ),
         }}
       />
@@ -104,4 +107,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   iconPillActive: { backgroundColor: colors.surfaceActive },
+  // Chats waiting for an answer: the amber of the rows that say so.
+  badge: {
+    backgroundColor: colors.warning,
+    color: colors.primaryForeground,
+    fontFamily: font.semibold,
+    fontSize: 10,
+  },
 })

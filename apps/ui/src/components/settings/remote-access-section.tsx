@@ -18,6 +18,7 @@ import {
   Share2,
   ShieldCheck,
   Smartphone,
+  SquareTerminal,
   Trash2,
   TriangleAlert,
 } from "lucide-react"
@@ -31,6 +32,9 @@ import { getSettings } from "@/services/backend"
 import { TailscaleServeCard } from "@/components/remote/tailscale-serve-card"
 import {
   createRemotePairingLink,
+  describeRemoteClient,
+  describeRemoteTerminals,
+  endRemoteSessionTerminals,
   getRemoteBootstrap,
   getRemoteStatus,
   getTailscaleStatus,
@@ -70,7 +74,8 @@ function formatDate(value: string): string {
 
 async function copyText(value: string, label: string): Promise<void> {
   try {
-    if (!await copyClipboardText(value)) throw new Error("Clipboard unavailable")
+    if (!(await copyClipboardText(value)))
+      throw new Error("Clipboard unavailable")
   } catch {
     try {
       const field = document.createElement("textarea")
@@ -118,9 +123,7 @@ export function SettingsRemoteAccessSection() {
   const [grant, setGrant] = useState<RemotePairingGrant | null>(null)
   const [customUrl, setCustomUrl] = useState(settings.remoteAccessCustomUrl)
   const [allowTerminal, setAllowTerminal] = useState(false)
-  const [tailscale, setTailscale] = useState<TailscaleRemoteStatus | null>(
-    null
-  )
+  const [tailscale, setTailscale] = useState<TailscaleRemoteStatus | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -234,7 +237,9 @@ export function SettingsRemoteAccessSection() {
       )
     } catch (cause) {
       const message =
-        cause instanceof Error ? cause.message : "Could not change Tailscale Serve"
+        cause instanceof Error
+          ? cause.message
+          : "Could not change Tailscale Serve"
       setError(message)
       toast.error(message)
     } finally {
@@ -322,6 +327,27 @@ export function SettingsRemoteAccessSection() {
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Could not revoke the device"
+      )
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const endTerminals = async (session: RemoteSession) => {
+    setBusy(`terminals:${session.id}`)
+    try {
+      const { ended } = await endRemoteSessionTerminals(session.id)
+      await refresh()
+      toast.success(
+        ended > 0
+          ? `Closed ${ended} terminal${ended === 1 ? "" : "s"} on ${session.label}`
+          : `${session.label} has no open terminals`
+      )
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not close the device's terminals"
       )
     } finally {
       setBusy(null)
@@ -589,31 +615,51 @@ export function SettingsRemoteAccessSection() {
         ) : (
           sessions.map((session) => {
             const current = session.id === currentSessionId
+            const client = describeRemoteClient(session.client)
+            const terminals = describeRemoteTerminals(session.terminals)
             return (
               <SettingsRow
-                description={`${current ? "This browser · " : ""}Last active ${formatDate(session.lastSeenAt)}`}
+                description={`${current ? "This browser · " : ""}${client ? `${client} · ` : ""}Last active ${formatDate(session.lastSeenAt)}${terminals ? ` · ${terminals}` : ""}`}
                 key={session.id}
                 label={session.label}
               >
-                <Button
-                  aria-label={
-                    current
-                      ? "Sign out this browser"
-                      : `Revoke ${session.label}`
-                  }
-                  disabled={busy !== null}
-                  onClick={() => void revoke(session)}
-                  size="icon-sm"
-                  variant="ghost"
-                >
-                  {busy === `revoke:${session.id}` ? (
-                    <LoaderCircle className="size-3.5 animate-spin" />
-                  ) : current ? (
-                    <LogOut className="size-3.5" />
-                  ) : (
-                    <Trash2 className="size-3.5 text-destructive" />
-                  )}
-                </Button>
+                <div className="flex shrink-0 items-center gap-1">
+                  {terminals && !remoteRuntime ? (
+                    <Button
+                      aria-label={`Close the terminals on ${session.label}`}
+                      disabled={busy !== null}
+                      onClick={() => void endTerminals(session)}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      {busy === `terminals:${session.id}` ? (
+                        <LoaderCircle className="mr-1.5 size-3.5 animate-spin" />
+                      ) : (
+                        <SquareTerminal className="mr-1.5 size-3.5" />
+                      )}
+                      Close terminals
+                    </Button>
+                  ) : null}
+                  <Button
+                    aria-label={
+                      current
+                        ? "Sign out this browser"
+                        : `Revoke ${session.label}`
+                    }
+                    disabled={busy !== null}
+                    onClick={() => void revoke(session)}
+                    size="icon-sm"
+                    variant="ghost"
+                  >
+                    {busy === `revoke:${session.id}` ? (
+                      <LoaderCircle className="size-3.5 animate-spin" />
+                    ) : current ? (
+                      <LogOut className="size-3.5" />
+                    ) : (
+                      <Trash2 className="size-3.5 text-destructive" />
+                    )}
+                  </Button>
+                </div>
               </SettingsRow>
             )
           })
@@ -644,15 +690,15 @@ export function SettingsRemoteAccessSection() {
 
       <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 text-xs leading-5 text-muted-foreground">
         <p className="flex items-center gap-2 font-medium text-foreground">
-          <TriangleAlert className="size-4 text-amber-500" /> Paired
-          devices can operate this host
+          <TriangleAlert className="size-4 text-amber-500" /> Paired devices can
+          operate this host
         </p>
         <p className="mt-1">
           A full session — HTTPS, this computer, your private network or your
-          tailnet — can read and operate chats and workspaces on this
-          computer. Pair only devices you control and revoke lost ones. Public
-          plaintext pairing, when explicitly enabled, is read-only and expires
-          in one hour. Never forward this port from a router without TLS.
+          tailnet — can read and operate chats and workspaces on this computer.
+          Pair only devices you control and revoke lost ones. Public plaintext
+          pairing, when explicitly enabled, is read-only and expires in one
+          hour. Never forward this port from a router without TLS.
         </p>
         {defaultLink ? (
           <a

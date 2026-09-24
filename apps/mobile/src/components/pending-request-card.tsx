@@ -1,6 +1,19 @@
 import { useMemo, useState } from "react"
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native"
-import { Check, HelpCircle, ShieldAlert, X } from "lucide-react-native"
+import {
+  Check,
+  CheckCheck,
+  HelpCircle,
+  ShieldAlert,
+  X,
+} from "lucide-react-native"
+import type { PermissionUpdate } from "@betterc0de/schema"
+import {
+  ALWAYS_ALLOW_DESTINATIONS,
+  alwaysAllowRules,
+  buildAlwaysAllowUpdate,
+  describeAlwaysAllowRules,
+} from "@betterc0de/schema/always-allow"
 import type { PendingRequest } from "@/types/remote"
 import {
   colors,
@@ -10,23 +23,39 @@ import {
   spacing,
   type,
 } from "@/design/theme"
+import { DropdownRow, DropdownSheet } from "./dropdown-sheet"
 import { MarkdownText } from "./markdown-text"
 
 export function PendingRequestCard({
   request,
   busy,
+  readOnly = false,
+  alwaysAllow = true,
   onRespond,
 }: {
   request: PendingRequest
   busy: boolean
+  /** A watch-only session sees the request but must answer it on the desktop. */
+  readOnly?: boolean
+  /** Offered as on the desktop: not while the chat's preset is Read-only. */
+  alwaysAllow?: boolean
   onRespond: (response: {
     decision?: "approve" | "deny"
     answers?: Record<string, unknown>
     message?: string
+    updatedPermissions?: PermissionUpdate[]
   }) => void
 }) {
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({})
   const [feedback, setFeedback] = useState("")
+  const [scopesOpen, setScopesOpen] = useState(false)
+  // `null` when no rule is narrow enough to remember safely: the option is
+  // hidden then, as on the desktop, instead of storing a broader grant.
+  const alwaysAllowRule = useMemo(() => {
+    if (request.kind !== "approval") return null
+    const rules = alwaysAllowRules(request)
+    return rules ? describeAlwaysAllowRules(rules) : null
+  }, [request])
   const questions = useMemo(() => request.questions ?? [], [request.questions])
   const canAnswer = useMemo(
     () =>
@@ -41,7 +70,7 @@ export function PendingRequestCard({
   )
 
   return (
-    <View style={styles.card}>
+    <View style={styles.card} testID={`request-${request.id}`}>
       <View style={styles.header}>
         {request.kind === "user-input" ? (
           <HelpCircle size={19} color={colors.info} />
@@ -50,9 +79,7 @@ export function PendingRequestCard({
         )}
         <View style={styles.headerCopy}>
           <Text style={styles.eyebrow}>
-            {request.kind === "user-input"
-              ? "QUESTION"
-              : "APPROVAL REQUIRED"}
+            {request.kind === "user-input" ? "QUESTION" : "APPROVAL REQUIRED"}
           </Text>
           <Text style={styles.title}>{request.title}</Text>
         </View>
@@ -71,7 +98,11 @@ export function PendingRequestCard({
           {formatInput(request.input)}
         </Text>
       ) : null}
-      {request.kind === "user-input" ? (
+      {readOnly ? (
+        <Text style={styles.readOnlyNote}>
+          This phone can only watch. Answer this on the desktop.
+        </Text>
+      ) : request.kind === "user-input" ? (
         <View style={styles.questions}>
           {questions.map((question) => (
             <View key={question.id} style={styles.question}>
@@ -160,12 +191,14 @@ export function PendingRequestCard({
             <ActionButton
               label="Deny"
               icon="deny"
+              testID="request-deny"
               disabled={busy}
               onPress={() => onRespond({ decision: "deny" })}
             />
             <ActionButton
               label="Send answer"
               icon="approve"
+              testID="request-answer"
               disabled={busy || !canAnswer}
               onPress={() => onRespond({ answers })}
               primary
@@ -188,6 +221,7 @@ export function PendingRequestCard({
             <ActionButton
               label="Deny"
               icon="deny"
+              testID="request-deny"
               disabled={busy}
               onPress={() =>
                 onRespond({
@@ -199,13 +233,52 @@ export function PendingRequestCard({
             <ActionButton
               label={request.kind === "plan" ? "Implement plan" : "Approve"}
               icon="approve"
+              testID="request-approve"
               disabled={busy}
               onPress={() => onRespond({ decision: "approve" })}
               primary
             />
           </View>
+          {alwaysAllow && alwaysAllowRule ? (
+            <View style={styles.actions}>
+              <ActionButton
+                label="Always allow"
+                icon="always"
+                testID="request-always-allow"
+                disabled={busy}
+                onPress={() => setScopesOpen(true)}
+              />
+            </View>
+          ) : null}
         </>
       )}
+      {alwaysAllowRule ? (
+        <DropdownSheet
+          visible={scopesOpen}
+          onClose={() => setScopesOpen(false)}
+          title="Always allow"
+        >
+          <Text style={styles.scopeNote}>
+            Approves this call, and the desktop stores the rule below: later
+            calls that match it run without asking.
+          </Text>
+          {ALWAYS_ALLOW_DESTINATIONS.map((destination) => (
+            <DropdownRow
+              key={destination.id}
+              label={destination.label}
+              sublabel={alwaysAllowRule}
+              onPress={() => {
+                setScopesOpen(false)
+                const update = buildAlwaysAllowUpdate(request, destination.id)
+                onRespond({
+                  decision: "approve",
+                  updatedPermissions: update ? [update] : undefined,
+                })
+              }}
+            />
+          ))}
+        </DropdownSheet>
+      ) : null}
     </View>
   )
 }
@@ -213,12 +286,14 @@ export function PendingRequestCard({
 function ActionButton({
   label,
   icon,
+  testID,
   disabled,
   primary = false,
   onPress,
 }: {
   label: string
-  icon: "approve" | "deny"
+  icon: "approve" | "deny" | "always"
+  testID: string
   disabled: boolean
   primary?: boolean
   onPress: () => void
@@ -227,6 +302,7 @@ function ActionButton({
     <Pressable
       accessibilityRole="button"
       accessibilityState={{ disabled }}
+      testID={testID}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
@@ -241,6 +317,8 @@ function ActionButton({
           size={17}
           color={primary ? colors.primaryForeground : colors.text}
         />
+      ) : icon === "always" ? (
+        <CheckCheck size={17} color={colors.text} />
       ) : (
         <X size={17} color={colors.danger} />
       )}
@@ -282,6 +360,12 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   header: { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm },
+  readOnlyNote: {
+    color: colors.textSecondary,
+    fontFamily: font.medium,
+    fontSize: 13,
+    lineHeight: 19,
+  },
   headerCopy: { flex: 1, minWidth: 0 },
   eyebrow: {
     color: colors.textSecondary,
@@ -371,6 +455,14 @@ const styles = StyleSheet.create({
     textAlignVertical: "top",
   },
   actions: { flexDirection: "row", gap: spacing.xs },
+  scopeNote: {
+    color: colors.textSecondary,
+    fontFamily: font.regular,
+    fontSize: 12,
+    lineHeight: 17,
+    paddingHorizontal: spacing.sm,
+    paddingBottom: spacing.xs,
+  },
   action: {
     flex: 1,
     minHeight: minTouchTarget,

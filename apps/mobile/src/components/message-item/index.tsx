@@ -9,6 +9,7 @@
 import { memo, useState } from "react"
 import { readBrowserElementAttachment } from "@betterc0de/schema"
 import { Pressable, StyleSheet, Text, View } from "react-native"
+import { formatTime } from "@/lib/format"
 import {
   Brain,
   ChevronDown,
@@ -22,6 +23,7 @@ import { colors, font, radius, spacing, type } from "@/design/theme"
 import { MarkdownText } from "../markdown-text"
 import { ProviderLogo, providerKindFromModelId } from "../provider-logo"
 import { FileChanges } from "./file-changes"
+import { MessagePhotos, shownPhotos } from "./message-photos"
 import { ToolCallGroup } from "./tool-calls"
 
 /**
@@ -36,7 +38,11 @@ import { ToolCallGroup } from "./tool-calls"
 // Memoised: the list re-renders on every streamed delta of the *current*
 // turn, and the rows above it derive tool presentation and diff groups
 // from their message on each render.
-export const MessageItem = memo(function MessageItem({ message }: { message: ChatMessage }) {
+export const MessageItem = memo(function MessageItem({
+  message,
+}: {
+  message: ChatMessage
+}) {
   const isUser = message.role === "user"
   const isSystem = message.role === "system"
 
@@ -44,6 +50,7 @@ export const MessageItem = memo(function MessageItem({ message }: { message: Cha
     return (
       <View style={styles.userWrap}>
         <View style={styles.userBubble}>
+          <MessagePhotos attachments={message.attachments} />
           {message.content ? (
             <Text selectable style={styles.userText}>
               {message.content}
@@ -86,35 +93,53 @@ export const MessageItem = memo(function MessageItem({ message }: { message: Cha
       ) : null}
       {message.content ? <MarkdownText content={message.content} /> : null}
       {message.diffs?.length ? <FileChanges diffs={message.diffs} /> : null}
+      <MessagePhotos attachments={message.attachments} />
       <MetaBadges message={message} />
     </View>
   )
 })
 
-export function StreamingMessage({ stream }: { stream: StreamState }) {
+/**
+ * The reply while it streams. `tools` are the turn's tool steps so far,
+ * built from its activities like the finished message's.
+ */
+export function StreamingMessage({
+  stream,
+  tools = [],
+}: {
+  stream: StreamState
+  tools?: NonNullable<ChatMessage["toolCalls"]>
+}) {
   return (
     <View style={styles.assistantWrap}>
       <View style={styles.metaRow}>
-        <View
-          style={[styles.liveDot, !stream.running && styles.liveDotIdle]}
-        />
+        <View style={[styles.liveDot, !stream.running && styles.liveDotIdle]} />
         <Text style={styles.metaText}>
           {stream.running ? "Working…" : "Turn finished"}
         </Text>
         <Text style={styles.metaTime}>{formatTime(stream.startedAt)}</Text>
       </View>
       {stream.reasoning ? (
-        <Reasoning content={stream.reasoning} defaultOpen streaming={stream.running && stream.isReasoning === true} />
+        <Reasoning
+          content={stream.reasoning}
+          defaultOpen
+          streaming={stream.running && stream.isReasoning === true}
+        />
       ) : null}
+      {tools.length ? <ToolCallGroup tools={tools} /> : null}
       {stream.content ? (
         <MarkdownText content={stream.content} />
       ) : stream.running ? (
         <View style={styles.thinkingRow}>
           <CircleDashed size={15} color={colors.textMuted} />
-          <Text style={styles.thinkingText}>{stream.isReasoning ? "Thinking…" : "Working…"}</Text>
+          <Text style={styles.thinkingText}>
+            {stream.isReasoning ? "Thinking…" : "Working…"}
+          </Text>
         </View>
       ) : null}
-      {stream.error ? <Text style={styles.errorText}>{stream.error}</Text> : null}
+      {stream.error ? (
+        <Text style={styles.errorText}>{stream.error}</Text>
+      ) : null}
     </View>
   )
 }
@@ -188,32 +213,39 @@ function prettyModelName(modelId: string | undefined): string {
 
 function MetaBadges({ message }: { message: ChatMessage }) {
   if (!message.attachments?.length) return null
-  const elements = message.attachments.flatMap(attachment => {
-    const element = readBrowserElementAttachment({ ...attachment, type: attachment.type ?? "file" })
+  const elements = message.attachments.flatMap((attachment) => {
+    const element = readBrowserElementAttachment({
+      ...attachment,
+      type: attachment.type ?? "file",
+    })
     return element ? [element] : []
   })
-  const fileCount = message.attachments.length - elements.length
+  // Photos show as thumbnails (MessagePhotos); the rest count as files.
+  const fileCount =
+    message.attachments.length -
+    elements.length -
+    shownPhotos(message.attachments).length
+  if (elements.length === 0 && fileCount === 0) return null
   return (
     <View style={styles.metaBadges}>
-      {elements.map((element, index) => <View key={`element-${index}`} style={styles.badge}><Globe size={12} color={colors.textSecondary} /><Text style={styles.badgeText}>{`<${element.tagName}> ${element.label}`}</Text></View>)}
-      {fileCount > 0 && <View style={styles.badge}>
-        <Paperclip size={12} color={colors.textSecondary} />
-        <Text style={styles.badgeText}>
-          {fileCount}{" "}
-          {fileCount === 1 ? "file" : "files"}
-        </Text>
-      </View>}
+      {elements.map((element, index) => (
+        <View key={`element-${index}`} style={styles.badge}>
+          <Globe size={12} color={colors.textSecondary} />
+          <Text
+            style={styles.badgeText}
+          >{`<${element.tagName}> ${element.label}`}</Text>
+        </View>
+      ))}
+      {fileCount > 0 && (
+        <View style={styles.badge}>
+          <Paperclip size={12} color={colors.textSecondary} />
+          <Text style={styles.badgeText}>
+            {fileCount} {fileCount === 1 ? "file" : "files"}
+          </Text>
+        </View>
+      )}
     </View>
   )
-}
-
-function formatTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ""
-  return date.toLocaleTimeString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-  })
 }
 
 const styles = StyleSheet.create({

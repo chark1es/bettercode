@@ -1,9 +1,17 @@
 import { z } from "zod"
-import { orchestratorSessionSchema, orchestratorStartSchema, orchestratorThreadSchema, orchestratorContextGrantSchema, orchestratorContextSchema, orchestratorContextKeySchema } from "./orchestrator"
+import {
+  orchestratorSessionSchema,
+  orchestratorStartSchema,
+  orchestratorThreadSchema,
+  orchestratorContextGrantSchema,
+  orchestratorContextSchema,
+  orchestratorContextKeySchema,
+} from "./orchestrator"
 import { threadGoalSchema } from "./thread-goal"
 import {
   chatApprovalSchema,
   chatAttachmentSchema,
+  chatGenerateCommitMessageSchema,
   chatInterruptSchema,
   chatPermissionModeSchema,
   chatPlanApprovalSchema,
@@ -14,10 +22,37 @@ import {
 import type { ChatMessage, ChatThread, ThreadActivity } from "./domain"
 import { publicSettingsSchema } from "./public-settings"
 import { settingsPatchSchema } from "./settings"
+import { threadMetadataUpdateSchema } from "./thread-metadata"
+
+// Its own module, so a client can read the frame without every contract.
+export {
+  threadMetadataUpdateSchema,
+  type ThreadMetadataUpdate,
+} from "./thread-metadata"
 import {
+  gitCheckoutSchema,
+  gitCommitSchema,
+  gitCwdSchema,
+  gitDiscardSchema,
+  gitHunkActionSchema,
+  gitLogSchema,
+  gitPathsSchema,
+  gitPushSchema,
+} from "./git"
+import {
+  workspaceContentSearchSchema,
+  workspaceDeleteSchema,
+  workspaceMkdirSchema,
+  workspaceMoveSchema,
+  workspaceWriteSchema,
+} from "./workspace"
+import {
+  threadCheckpointRevertSchema,
   threadMessageSchema,
   threadMetaSchema,
+  threadRenameSchema,
   threadSaveSchema,
+  threadWorktreeCreateSchema,
 } from "./threads"
 
 const text = z.string()
@@ -200,6 +235,127 @@ const contextCheckpointResponseFields = {
   generation: count,
 }
 
+/** The repository's local branches, and the checked-out one ("" when detached). */
+export const gitBranchesResponseSchema = z
+  .object({ branches: z.array(text), current: text })
+  .passthrough()
+
+/** The checked-out branch, its upstream, and the changed files by state. */
+export const gitStatusResponseSchema = z
+  .object({
+    branch: text,
+    is_clean: z.boolean(),
+    staged: z.array(text),
+    modified: z.array(text),
+    untracked: z.array(text),
+    ahead: count,
+    behind: count,
+    upstream: text.nullable(),
+  })
+  .passthrough()
+
+/** A diff to show, cut on a line boundary when it is larger than the desktop sends. */
+export const gitDisplayDiffResponseSchema = z
+  .object({ diff: text, truncated: z.boolean(), totalBytes: count })
+  .passthrough()
+
+export const gitOkResponseSchema = z
+  .object({ ok: z.literal(true) })
+  .passthrough()
+
+/** What git printed (commit, push, pull). */
+export const gitOutputResponseSchema = z.object({ output: text }).passthrough()
+
+export const gitFetchResponseSchema = z
+  .object({ status: gitStatusResponseSchema })
+  .passthrough()
+
+/** The latest commits, newest first. */
+export const gitLogResponseSchema = z
+  .object({
+    commits: z.array(
+      z
+        .object({
+          hash: text,
+          message: text.optional(),
+          author: text.optional(),
+          date: text.optional(),
+        })
+        .passthrough()
+    ),
+  })
+  .passthrough()
+
+/** A hunk staged, discarded or unstaged; `replayed` when it was already done. */
+export const gitHunkActionResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    action: z.enum(["accept", "reject", "unstage"]),
+    patchId: text,
+    applied: z.boolean(),
+    replayed: z.boolean().optional(),
+  })
+  .passthrough()
+
+/**
+ * A content search, file by file, with each match's line and a preview.
+ * `truncated` when a limit (results, files, bytes, time) cut it short.
+ */
+export const workspaceContentSearchResponseSchema = z
+  .object({
+    results: z.array(
+      z
+        .object({
+          path: text,
+          name: text,
+          matches: z.array(
+            z
+              .object({
+                line: count,
+                column: count,
+                length: count,
+                previewColumn: count,
+                previewLength: count,
+                preview: text,
+              })
+              .passthrough()
+          ),
+        })
+        .passthrough()
+    ),
+    truncated: z.boolean(),
+    // A string, not an enum: a desktop may add a reason.
+    truncatedReason: text.optional(),
+  })
+  .passthrough()
+
+export const commitMessageResponseSchema = z
+  .object({ subject: text, body: text, branch: text.optional() })
+  .passthrough()
+
+/** A chat's own git worktree, on a new branch from `baseBranch`. */
+export const threadWorktreeCreateResponseSchema = z
+  .object({
+    worktreeId: text,
+    threadId: text,
+    worktreePath: text,
+    branch: text,
+    baseBranch: text,
+    headSha: text.nullable(),
+  })
+  .passthrough()
+
+/** A checkpoint restore: `reverted: false` comes with the reason. */
+export const threadCheckpointRevertResponseSchema = z
+  .object({
+    reverted: z.boolean(),
+    rolledBackTurns: count,
+    deletedMessages: count,
+    boundaryMessageId: text.nullable(),
+    reason: text.optional(),
+  })
+  .passthrough()
+
 export const chatSendResponseSchema = z
   .object({
     status: z.enum(["streaming", "completed"]),
@@ -211,13 +367,15 @@ export const chatSendResponseSchema = z
         ...contextCheckpointResponseFields,
       })
       .optional(),
-    providerHandoff: z.object({
-      reason: z.literal("provider-switch"),
-      sourceProvider: text.min(1),
-      targetProvider: text.min(1),
-      sourceModel: text.min(1),
-      ...contextCheckpointResponseFields,
-    }).optional(),
+    providerHandoff: z
+      .object({
+        reason: z.literal("provider-switch"),
+        sourceProvider: text.min(1),
+        targetProvider: text.min(1),
+        sourceModel: text.min(1),
+        ...contextCheckpointResponseFields,
+      })
+      .optional(),
   })
   .passthrough()
 export const approvalResponseSchema = z.discriminatedUnion("status", [
@@ -232,8 +390,10 @@ export const approvalResponseSchema = z.discriminatedUnion("status", [
 export type ChatSendResponse = z.infer<typeof chatSendResponseSchema>
 export type ApprovalResponse = z.infer<typeof approvalResponseSchema>
 
+type HttpContractMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+
 function endpoint<I extends z.ZodType, O extends z.ZodType>(
-  method: "GET" | "POST" | "PATCH",
+  method: HttpContractMethod,
   path: string,
   request: I,
   response: O
@@ -242,13 +402,48 @@ function endpoint<I extends z.ZodType, O extends z.ZodType>(
 }
 const noBody = z.undefined()
 export const httpContracts = {
-  orchestratorStart: endpoint("POST", "/orchestrator/start", orchestratorStartSchema, orchestratorSessionSchema),
-  orchestratorStatus: endpoint("POST", "/orchestrator/status", orchestratorThreadSchema, orchestratorSessionSchema.nullable()),
-  orchestratorStop: endpoint("POST", "/orchestrator/stop", orchestratorThreadSchema, orchestratorSessionSchema),
-  orchestratorContextGrant: endpoint("POST", "/orchestrator/context/grant", orchestratorContextGrantSchema, orchestratorContextSchema),
-  orchestratorContextRead: endpoint("POST", "/orchestrator/context/read", orchestratorContextKeySchema, orchestratorContextSchema),
-  orchestratorContextRemove: endpoint("POST", "/orchestrator/context/remove", orchestratorContextKeySchema, z.object({ removed: z.literal(true) })),
-  chatGoal: endpoint("POST", "/chat/goal", chatSendSchema, z.object({ goal: threadGoalSchema.nullable() })),
+  orchestratorStart: endpoint(
+    "POST",
+    "/orchestrator/start",
+    orchestratorStartSchema,
+    orchestratorSessionSchema
+  ),
+  orchestratorStatus: endpoint(
+    "POST",
+    "/orchestrator/status",
+    orchestratorThreadSchema,
+    orchestratorSessionSchema.nullable()
+  ),
+  orchestratorStop: endpoint(
+    "POST",
+    "/orchestrator/stop",
+    orchestratorThreadSchema,
+    orchestratorSessionSchema
+  ),
+  orchestratorContextGrant: endpoint(
+    "POST",
+    "/orchestrator/context/grant",
+    orchestratorContextGrantSchema,
+    orchestratorContextSchema
+  ),
+  orchestratorContextRead: endpoint(
+    "POST",
+    "/orchestrator/context/read",
+    orchestratorContextKeySchema,
+    orchestratorContextSchema
+  ),
+  orchestratorContextRemove: endpoint(
+    "POST",
+    "/orchestrator/context/remove",
+    orchestratorContextKeySchema,
+    z.object({ removed: z.literal(true) })
+  ),
+  chatGoal: endpoint(
+    "POST",
+    "/chat/goal",
+    chatSendSchema,
+    z.object({ goal: threadGoalSchema.nullable() })
+  ),
   chatSend: endpoint(
     "POST",
     "/chat/send",
@@ -303,6 +498,7 @@ export const httpContracts = {
     noBody,
     z.array(chatThreadResponseSchema)
   ),
+  getThread: endpoint("GET", "/threads/:id", noBody, chatThreadResponseSchema),
   listMessages: endpoint(
     "GET",
     "/threads/:id/messages",
@@ -317,6 +513,142 @@ export const httpContracts = {
   ),
   saveThread: endpoint("POST", "/threads", threadSaveSchema, z.void()),
   updateThread: endpoint("PATCH", "/threads/:id", threadMetaSchema, z.void()),
+  renameThread: endpoint(
+    "POST",
+    "/threads/:id/title",
+    threadRenameSchema,
+    threadMetadataUpdateSchema
+  ),
+  deleteThread: endpoint("DELETE", "/threads/:id", noBody, z.void()),
+  createThreadWorktree: endpoint(
+    "POST",
+    "/threads/:id/worktree",
+    threadWorktreeCreateSchema,
+    threadWorktreeCreateResponseSchema
+  ),
+  revertThreadCheckpoint: endpoint(
+    "POST",
+    "/threads/:id/checkpoint/revert",
+    threadCheckpointRevertSchema,
+    threadCheckpointRevertResponseSchema
+  ),
+  gitBranches: endpoint(
+    "POST",
+    "/git/branches",
+    gitCwdSchema,
+    gitBranchesResponseSchema
+  ),
+  gitStatus: endpoint(
+    "POST",
+    "/git/status",
+    gitCwdSchema,
+    gitStatusResponseSchema
+  ),
+  gitDiff: endpoint(
+    "POST",
+    "/git/diff",
+    gitCwdSchema,
+    gitDisplayDiffResponseSchema
+  ),
+  gitDiffStaged: endpoint(
+    "POST",
+    "/git/diff-staged",
+    gitCwdSchema,
+    gitDisplayDiffResponseSchema
+  ),
+  gitStage: endpoint("POST", "/git/stage", gitPathsSchema, gitOkResponseSchema),
+  gitUnstage: endpoint(
+    "POST",
+    "/git/unstage",
+    gitPathsSchema,
+    gitOkResponseSchema
+  ),
+  gitStageAll: endpoint(
+    "POST",
+    "/git/stage-all",
+    gitCwdSchema,
+    gitOkResponseSchema
+  ),
+  gitUnstageAll: endpoint(
+    "POST",
+    "/git/unstage-all",
+    gitCwdSchema,
+    gitOkResponseSchema
+  ),
+  gitDiscard: endpoint(
+    "POST",
+    "/git/discard",
+    gitDiscardSchema,
+    gitOkResponseSchema
+  ),
+  gitHunkApply: endpoint(
+    "POST",
+    "/git/hunks/apply",
+    gitHunkActionSchema,
+    gitHunkActionResponseSchema
+  ),
+  gitCommit: endpoint(
+    "POST",
+    "/git/commit",
+    gitCommitSchema,
+    gitOutputResponseSchema
+  ),
+  gitPush: endpoint(
+    "POST",
+    "/git/push",
+    gitPushSchema,
+    gitOutputResponseSchema
+  ),
+  gitPull: endpoint("POST", "/git/pull", gitCwdSchema, gitOutputResponseSchema),
+  gitFetch: endpoint(
+    "POST",
+    "/git/fetch",
+    gitCwdSchema,
+    gitFetchResponseSchema
+  ),
+  gitCheckout: endpoint(
+    "POST",
+    "/git/checkout",
+    gitCheckoutSchema,
+    gitOkResponseSchema
+  ),
+  gitLog: endpoint("POST", "/git/log", gitLogSchema, gitLogResponseSchema),
+  workspaceWrite: endpoint(
+    "POST",
+    "/workspace/write",
+    workspaceWriteSchema,
+    z.void()
+  ),
+  workspaceMkdir: endpoint(
+    "POST",
+    "/workspace/mkdir",
+    workspaceMkdirSchema,
+    z.void()
+  ),
+  workspaceMove: endpoint(
+    "POST",
+    "/workspace/move",
+    workspaceMoveSchema,
+    z.void()
+  ),
+  workspaceDelete: endpoint(
+    "POST",
+    "/workspace/delete",
+    workspaceDeleteSchema,
+    z.void()
+  ),
+  workspaceSearchContent: endpoint(
+    "POST",
+    "/workspace/search-content",
+    workspaceContentSearchSchema,
+    workspaceContentSearchResponseSchema
+  ),
+  generateCommitMessage: endpoint(
+    "POST",
+    "/chat/text-generation/commit-message",
+    chatGenerateCommitMessageSchema,
+    commitMessageResponseSchema
+  ),
   saveMessage: endpoint(
     "POST",
     "/threads/:id/messages",
@@ -341,7 +673,7 @@ export type HttpContractRequest<K extends HttpContractName> = z.input<
 
 export interface ContractTransportInput {
   path: string
-  method: "GET" | "POST" | "PATCH"
+  method: HttpContractMethod
   body?: unknown
 }
 

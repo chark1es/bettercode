@@ -1,13 +1,32 @@
 import { createHash } from "node:crypto"
 import os from "node:os"
 import { isRecord } from "@betterc0de/schema"
+import {
+  REMOTE_CLIENT_HEADER,
+  REMOTE_MIN_CLIENT_VERSION,
+  parseRemoteClientHeader,
+  remoteClientNeedsUpdate,
+  type RemoteAccessLevel,
+  type RemoteClientInfo,
+  type RemoteProtocol,
+} from "@betterc0de/schema/remote-protocol"
 import type { Context, Hono, MiddlewareHandler } from "hono"
 import { deleteCookie, setCookie } from "hono/cookie"
 import type { AppState } from "../appState"
 import type { ServerConfig } from "../config"
 import { createRateLimiter } from "../http/middleware/rateLimit"
+import { logger } from "../observability/logger"
 import { readCookie } from "../security/cookie"
 import { constantTimeEqual } from "../security/token"
+import {
+  activeShellSessionCountForOwner,
+  closeShellSessionsForOwner,
+} from "../services/shell"
+import {
+  activeTerminalPtySessionCount,
+  shutdownTerminalPtySessionsForOwner,
+} from "../services/terminalPty"
+import type { RemoteTerminalChannel } from "../ws/terminalChannel"
 import {
   REMOTE_SESSION_COOKIE,
   type RemoteAccessService,
@@ -19,6 +38,7 @@ import {
   isLoopbackIpAddress,
   isPrivateLanAddress,
 } from "./privateNetwork"
+import { describeRemoteProtocol, publicRemoteProtocol } from "./protocol"
 import {
   DEFAULT_TAILSCALE_SERVE_PORT,
   isTailscaleAddress,
@@ -326,6 +346,7 @@ const READ_ONLY_REMOTE_GET_PATHS = [
   /^\/api\/v1\/providers\/instances\/[^/]+\/models$/,
   /^\/api\/v1\/threads$/,
   /^\/api\/v1\/threads\/stats$/,
+  /^\/api\/v1\/threads\/[^/]+$/,
   /^\/api\/v1\/threads\/[^/]+\/(?:messages|activities|diffs|checkpoint-recovery)$/,
 ] as const
 
@@ -345,6 +366,71 @@ export function requiresReadOnlyRemoteAccess(
     (identity.session?.accessLevel === "read_only" ||
       isInsecureNonLoopbackRequest(c, config))
   )
+}
+
+/** The calling app's self-identification (`X-BetterC0de-Client`), if any. */
+export function requestClientInfo(c: Context): RemoteClientInfo | null {
+  return parseRemoteClientHeader(c.req.header(REMOTE_CLIENT_HEADER))
+}
+
+/**
+ * The 426 an app below the desktop's minimum receives. Older apps show
+ * `error` verbatim, so it has to make sense on its own.
+ */
+export function clientUpdateRequiredBody(): {
+  error: string
+  code: "client_update_required"
+  minClientVersion: string
+} {
+  return {
+    error:
+      "This version of BetterC0de Remote is too old for this desktop. Update the app.",
+    code: "client_update_required",
+    minClientVersion: REMOTE_MIN_CLIENT_VERSION,
+  }
+}
+
+/**
+ * An app that has to update must still be able to sign out, so the desktop
+ * does not keep a session the user can no longer reach.
+ */
+export function isClientUpdateGateExempt(c: Context): boolean {
+  return c.req.method === "POST" && c.req.path === "/api/v1/remote/logout"
+}
+
+/** Access level of a remote caller for this request, plaintext downgrade included. */
+export function effectiveRemoteAccessLevel(
+  c: Context,
+  config: ServerConfig,
+  identity: RemoteRequestIdentity
+): RemoteAccessLevel {
+  return requiresReadOnlyRemoteAccess(c, config, identity)
+    ? "read_only"
+    : "full"
+}
+
+/**
+ * The protocol block for this caller: version and minimum for anyone, the
+ * capabilities only for an authenticated caller.
+ */
+export function requestRemoteProtocol(
+  c: Context,
+  config: ServerConfig,
+  state: AppState,
+  identity: RemoteRequestIdentity | null
+): RemoteProtocol {
+  if (!identity) return publicRemoteProtocol()
+  if (identity.kind === "local") {
+    return describeRemoteProtocol({
+      accessLevel: "full",
+      terminalAllowed: true,
+    })
+  }
+  return describeRemoteProtocol({
+    accessLevel: effectiveRemoteAccessLevel(c, config, identity),
+    terminalAllowed:
+      state.settings?.get().remote_access_allow_terminal === true,
+  })
 }
 
 export function isReadOnlyRemoteRequestAllowed(c: Context): boolean {
@@ -716,7 +802,10 @@ export function createPairingAdmissionMiddleware(
         "Retry-After",
         String(Math.max(1, Math.ceil(rate.retryAfterMs / 1000)))
       )
-      return c.json({ error: "too many pairing attempts" }, 429)
+      return c.json(
+        { error: "too many pairing attempts", code: "rate_limited" },
+        429
+      )
     }
     return next()
   }
@@ -748,7 +837,13 @@ export function registerRemotePublicRoutes(
       (c.req.header("Authorization") !== undefined ||
         c.req.header("Cookie") !== undefined)
     ) {
-      return c.json({ error: "secure transport required" }, 426)
+      return c.json(
+        {
+          error: "secure transport required",
+          code: "secure_transport_required",
+        },
+        426
+      )
     }
     const identity = requestIdentity(c, config, state)
     return c.json({
@@ -759,6 +854,7 @@ export function registerRemotePublicRoutes(
       environmentId: enabled
         ? (state.remoteAccess?.environmentId() ?? null)
         : null,
+      protocol: requestRemoteProtocol(c, config, state, identity),
     })
   })
 
@@ -791,18 +887,38 @@ async function handlePairing(
 ): Promise<Response> {
   const service = state.remoteAccess
   if (!service?.enabled()) {
-    return c.json({ error: "remote access is disabled" }, 403)
+    return c.json(
+      { error: "remote access is disabled", code: "remote_access_disabled" },
+      403
+    )
   }
   if (!isRemoteRequestTransportAllowed(c, config)) {
-    return c.json({ error: "secure transport required" }, 426)
+    return c.json(
+      { error: "secure transport required", code: "secure_transport_required" },
+      426
+    )
+  }
+  // Refused before the one-time code is spent, so the same code still works
+  // after the app is updated.
+  const client = requestClientInfo(c)
+  if (remoteClientNeedsUpdate(client)) {
+    return c.json(clientUpdateRequiredBody(), 426)
   }
   let body: unknown
   try {
     body = await c.req.json()
   } catch {
-    return c.json({ error: "invalid pairing request" }, 400)
+    return c.json(
+      { error: "invalid pairing request", code: "invalid_request" },
+      400
+    )
   }
-  if (!isRecord(body)) return c.json({ error: "invalid pairing request" }, 400)
+  if (!isRecord(body)) {
+    return c.json(
+      { error: "invalid pairing request", code: "invalid_request" },
+      400
+    )
+  }
   const credential =
     typeof body.credential === "string" && body.credential.length <= 64
       ? body.credential
@@ -815,8 +931,16 @@ async function handlePairing(
     label,
     ...pairingSessionRestrictions(c, config),
   })
-  if (!issued)
-    return c.json({ error: "pairing code is invalid or expired" }, 401)
+  if (!issued) {
+    return c.json(
+      {
+        error: "pairing code is invalid or expired",
+        code: "pairing_code_invalid",
+      },
+      401
+    )
+  }
+  if (client) service.noteClient(issued.id, client)
 
   const session = {
     id: issued.id,
@@ -825,7 +949,13 @@ async function handlePairing(
     createdAt: issued.createdAt,
     lastSeenAt: issued.lastSeenAt,
     expiresAt: issued.expiresAt,
+    client,
   }
+  const protocol = describeRemoteProtocol({
+    accessLevel: issued.accessLevel,
+    terminalAllowed:
+      state.settings?.get().remote_access_allow_terminal === true,
+  })
   c.header("Cache-Control", "no-store")
   if (delivery === "cookie") {
     const maxAge = Math.max(
@@ -845,6 +975,7 @@ async function handlePairing(
       authentication: "remote",
       environmentId: service.environmentId(),
       session,
+      protocol,
     })
   }
   c.header("Pragma", "no-cache")
@@ -856,14 +987,33 @@ async function handlePairing(
     tokenType: "Bearer",
     sessionToken: issued.token,
     session,
+    protocol,
   })
+}
+
+/**
+ * A paired device's running terminals: its PTYs and its shell commands,
+ * whichever way it opened them (the WebSocket or the shell routes).
+ */
+function runningRemoteTerminals(sessionId: string): number {
+  const ownerId = `remote:${sessionId}`
+  return (
+    activeTerminalPtySessionCount(ownerId) +
+    activeShellSessionCountForOwner(ownerId)
+  )
+}
+
+export interface RemoteRoutesOptions {
+  /** Tells a device why its terminals over the WebSocket end. */
+  readonly remoteTerminals?: Pick<RemoteTerminalChannel, "endedOnDesktop">
 }
 
 /** Authenticated remote-management routes mounted under `/api/v1`. */
 export function registerRemoteRoutes(
   api: Hono,
   config: ServerConfig,
-  state: AppState
+  state: AppState,
+  options: RemoteRoutesOptions = {}
 ): void {
   api.get("/remote/status", async (c) => {
     const service = remoteService(state)
@@ -994,8 +1144,52 @@ export function registerRemoteRoutes(
     const identity = requestIdentity(c, config, state)
     return c.json({
       currentSessionId: identity?.session?.id ?? null,
-      sessions: service.listSessions(),
+      sessions: service.listSessions().map((session) => ({
+        ...session,
+        terminals: runningRemoteTerminals(session.id),
+      })),
     })
+  })
+
+  // Ends a device's terminals and the commands it runs, over the WebSocket
+  // and the shell routes alike; the device stays paired.
+  api.delete("/remote/sessions/:sessionId/terminals", async (c) => {
+    if (!isLocalOwnerRequest(c, config, state)) {
+      return c.json(
+        { error: "remote sessions can only be managed by the desktop host" },
+        403
+      )
+    }
+    const sessionId = c.req.param("sessionId")
+    if (!sessionId || sessionId.length > 100) {
+      return c.json({ error: "invalid session id" }, 400)
+    }
+    const ownerId = `remote:${sessionId}`
+    const running = runningRemoteTerminals(sessionId)
+    options.remoteTerminals?.endedOnDesktop(sessionId)
+    const results = await Promise.allSettled([
+      shutdownTerminalPtySessionsForOwner(ownerId),
+      closeShellSessionsForOwner(ownerId),
+    ])
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : []
+    )
+    // Who and how many: never what the terminals showed.
+    logger.info(
+      { sessionId, terminals: running, failed: failures.length > 0 },
+      "remote terminals ended on the desktop"
+    )
+    if (failures.length > 0) {
+      logger.error(
+        { err: failures[0], sessionId },
+        "a paired device's terminals could not all be ended"
+      )
+      return c.json(
+        { error: "Some of this device's terminals could not be ended." },
+        500
+      )
+    }
+    return c.json({ ended: running })
   })
 
   api.delete("/remote/sessions/:sessionId", async (c) => {

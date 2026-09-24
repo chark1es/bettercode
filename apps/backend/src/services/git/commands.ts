@@ -4,10 +4,7 @@
  * typed errors the UI can explain.
  */
 
-import {
-  gitRun,
-  isMissingRevisionError,
-} from "./process"
+import { gitRun, isMissingRevisionError } from "./process"
 import {
   validateGitRemoteName,
   assertValidBranchName,
@@ -46,21 +43,36 @@ const NO_COMMIT_PATTERNS = [
   /no changes added to commit/i,
 ] as const
 
+// A nominal HttpError: the route shows its words, where a plain error with
+// a status would read "git commit failed".
+function nothingToCommit(): Error {
+  return new HttpError(
+    400,
+    "Nothing to commit — stage changes first or modify a tracked file.",
+    "git_nothing_to_commit"
+  )
+}
+
 export async function commit(cwd: string, message: string) {
-  const { stdout, stderr } = await gitRun(cwd, ["commit", "-F", "-"], {
-    input: message,
-  })
-  const combined = `${stdout}\n${stderr}`
+  let result: { stdout: string; stderr: string }
+  try {
+    result = await gitRun(cwd, ["commit", "-F", "-"], { input: message })
+  } catch (error) {
+    // Git exits with status 1 when there is nothing to commit, so gitRun
+    // rejects before the check below can see the output.
+    const failed = error as { stdout?: string; stderr?: string }
+    const output = `${failed.stdout ?? ""}\n${failed.stderr ?? ""}`
+    if (NO_COMMIT_PATTERNS.some((re) => re.test(output))) {
+      throw nothingToCommit()
+    }
+    throw error
+  }
+  const combined = `${result.stdout}\n${result.stderr}`
   if (NO_COMMIT_PATTERNS.some((re) => re.test(combined))) {
-    throw Object.assign(
-      new Error(
-        "Nothing to commit — stage changes first or modify a tracked file."
-      ),
-      { statusCode: 400 }
-    )
+    throw nothingToCommit()
   }
   await invalidateStatusCache(cwd)
-  return { output: stdout }
+  return { output: result.stdout }
 }
 
 /**
@@ -201,17 +213,29 @@ export async function pull(cwd: string) {
 /** Refresh remote-tracking refs without merging into the working tree. */
 export async function fetchRemote(cwd: string) {
   if ((await listRemotes(cwd)).length === 0) {
-    throw new HttpError(400, "No remote configured. Add a remote before checking for updates.", "git_remote_error")
+    throw new HttpError(
+      400,
+      "No remote configured. Add a remote before checking for updates.",
+      "git_remote_error"
+    )
   }
   try {
-    await gitRun(cwd, ["fetch", "--all", "--no-recurse-submodules"], { timeoutMs: 60_000 })
+    await gitRun(cwd, ["fetch", "--all", "--no-recurse-submodules"], {
+      timeoutMs: 60_000,
+    })
     await invalidateStatusCache(cwd)
     return { status: await status(cwd) }
   } catch (err) {
-    const classified = classifyRemoteGitError(err instanceof Error ? err.message : String(err), "fetch")
-    throw new HttpError(classified?.status ?? 502,
-      classified?.message ?? "Could not fetch remote updates. Check your connection and Git credentials, then try again.",
-      "git_remote_error")
+    const classified = classifyRemoteGitError(
+      err instanceof Error ? err.message : String(err),
+      "fetch"
+    )
+    throw new HttpError(
+      classified?.status ?? 502,
+      classified?.message ??
+        "Could not fetch remote updates. Check your connection and Git credentials, then try again.",
+      "git_remote_error"
+    )
   }
 }
 

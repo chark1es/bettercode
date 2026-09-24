@@ -7,6 +7,12 @@ inputs:
     description: Node version to use instead of the exact pin in .nvmrc.
     required: false
     default: ""
+  desktop:
+    description: >-
+      "false" for jobs that build only the phone app: no Electron cache and
+      no Linux packaging tools.
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -19,6 +25,7 @@ runs:
         cache: npm
 
     - name: Cache Electron and electron-builder downloads
+      if: inputs.desktop == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
@@ -32,13 +39,30 @@ runs:
         restore-keys: electron-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Install Linux packaging and display tools
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' && inputs.desktop == 'true'
       shell: bash
       # xvfb: virtual display for the packaged-app smoke tests.
       # rpm: rpmbuild for electron-builder's .rpm target.
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y -qq --no-install-recommends xvfb rpm
+
+    - name: Keep Windows Defender out of the work folders
+      if: runner.os == 'Windows'
+      shell: pwsh
+      # The runner is discarded after the job. Real-time scanning of the
+      # checkout and the temp folders made writes and process starts slow and
+      # uneven there: SQLite retries a write while a scanner holds the file,
+      # and a test file that takes 4 s took 127 s on one runner. A runner
+      # image without Defender only warns.
+      run: |
+        $folders = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:TEMP, (Join-Path $env:LOCALAPPDATA 'Temp'))
+        try {
+          Add-MpPreference -ExclusionPath $folders -ErrorAction Stop
+          Write-Host "Defender skips: $($folders -join ', ')"
+        } catch {
+          Write-Host "::warning::Defender exclusions not set: $($_.Exception.Message)"
+        }
 
     - name: Choose the format-check base revision
       shell: bash

@@ -7,7 +7,7 @@ import {
   Text,
   View,
 } from "react-native"
-import { Redirect, useLocalSearchParams, useRouter } from "expo-router"
+import { useLocalSearchParams, useRouter } from "expo-router"
 import {
   ArrowLeft,
   ChevronDown,
@@ -15,30 +15,22 @@ import {
   FileDiff,
   RefreshCw,
 } from "lucide-react-native"
+import { parseGitDiff } from "@betterc0de/schema/git-diff"
 import { Screen, StateView } from "@/components/layout"
 import { IconButton } from "@/components/icon-button"
 import { colors, font, radius, spacing, type } from "@/design/theme"
-import { remoteApi } from "@/lib/remote-api"
+import { changeItems } from "@/lib/chat-changes"
+import { formatShortDateTime } from "@/lib/format"
+import { remoteErrorMessage } from "@/lib/remote-errors"
 import { useAppStore } from "@/store/app-store"
-import { useSessionStore } from "@/store/session-store"
+import { useRemoteApi } from "@/transport/use-transport"
 import type { ThreadDiffs } from "@/types/remote"
-
-interface DiffItem {
-  id: string
-  title: string
-  subtitle: string
-  diff: string
-  additions: number | null
-  deletions: number | null
-  files: number | null
-  createdAt: string
-}
 
 export default function ChangesScreen() {
   const params = useLocalSearchParams<{ id: string | string[] }>()
   const threadId = Array.isArray(params.id) ? params.id[0] : params.id
   const router = useRouter()
-  const profile = useSessionStore((state) => state.profile)
+  const api = useRemoteApi()
   const thread = useAppStore((state) =>
     state.threads.find((item) => item.id === threadId)
   )
@@ -48,54 +40,24 @@ export default function ChangesScreen() {
   const [expanded, setExpanded] = useState<string | null>(null)
 
   const load = async () => {
-    if (!profile || !threadId) return
+    if (!api || !threadId) return
     setLoading(true)
     setError(null)
     try {
-      setDiffs(await remoteApi(profile).listDiffs(threadId))
+      setDiffs(await api.listDiffs(threadId))
     } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : "Failed to load changes."
-      )
+      setError(remoteErrorMessage(caught))
     } finally {
       setLoading(false)
     }
   }
   useEffect(() => {
     void load()
-    // Thread identity is the stable fetch key.
+    // The connection and the chat are the stable fetch keys.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.environmentId, threadId])
+  }, [api, threadId])
 
-  const items = useMemo<DiffItem[]>(() => {
-    if (!diffs) return []
-    return [
-      ...diffs.turnDiffs.map((diff) => ({
-        id: `turn-${diff.turnIndex}-${diff.createdAt}`,
-        title: `Turn ${diff.turnIndex}`,
-        subtitle: "Working tree changes",
-        diff: diff.diffText,
-        additions: diff.insertions,
-        deletions: diff.deletions,
-        files: diff.filesChanged,
-        createdAt: diff.createdAt,
-      })),
-      ...diffs.checkpointDiffs.map((diff) => ({
-        id: diff.id,
-        title: "Checkpoint",
-        subtitle: diff.checkpointRef,
-        diff: diff.diffContent,
-        additions: null,
-        deletions: null,
-        files: null,
-        createdAt: diff.createdAt,
-      })),
-    ].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-  }, [diffs])
-
-  if (!profile) return <Redirect href="/pair" />
+  const items = useMemo(() => changeItems(diffs), [diffs])
 
   return (
     <Screen edges={["top", "bottom"]}>
@@ -113,7 +75,7 @@ export default function ChangesScreen() {
         </View>
         <IconButton
           icon={RefreshCw}
-          label="Aktualisieren"
+          label="Refresh"
           tone="mint"
           onPress={() => void load()}
         />
@@ -165,7 +127,7 @@ export default function ChangesScreen() {
                     <View style={styles.stats}>
                       {item.files !== null ? (
                         <Text style={styles.fileStat}>
-                          {item.files} Dateien
+                          {item.files} {item.files === 1 ? "file" : "files"}
                         </Text>
                       ) : null}
                       {item.additions !== null ? (
@@ -175,7 +137,7 @@ export default function ChangesScreen() {
                         <Text style={styles.del}>−{item.deletions}</Text>
                       ) : null}
                       <Text style={styles.date}>
-                        {formatDate(item.createdAt)}
+                        {formatShortDateTime(item.createdAt)}
                       </Text>
                     </View>
                   </View>
@@ -185,7 +147,17 @@ export default function ChangesScreen() {
                     <ChevronRight size={19} color={colors.textMuted} />
                   )}
                 </Pressable>
-                {open ? <DiffPreview value={item.diff} /> : null}
+                {open ? (
+                  <DiffFiles
+                    diff={item.diff}
+                    onOpen={(file) =>
+                      router.push({
+                        pathname: "/chat/[id]/diff",
+                        params: { id: threadId ?? "", item: item.id, file },
+                      })
+                    }
+                  />
+                ) : null}
               </View>
             )
           }}
@@ -202,44 +174,43 @@ export default function ChangesScreen() {
   )
 }
 
-function DiffPreview({ value }: { value: string }) {
-  const lines = value.replace(/\r\n/g, "\n").split("\n")
-  const visible = lines.slice(0, 500)
+/** The files of one diff; each opens in full on its own screen. */
+function DiffFiles({
+  diff,
+  onOpen,
+}: {
+  diff: string
+  onOpen: (file: string) => void
+}) {
+  const files = useMemo(() => parseGitDiff(diff), [diff])
+  if (files.length === 0) {
+    return <Text style={styles.noFiles}>This diff names no files.</Text>
+  }
   return (
-    <View style={styles.preview}>
-      {visible.map((line, index) => (
-        <Text
-          selectable
-          key={index}
-          style={[
-            styles.diffLine,
-            line.startsWith("+") && !line.startsWith("+++") && styles.diffAdd,
-            line.startsWith("-") &&
-              !line.startsWith("---") &&
-              styles.diffDelete,
-            line.startsWith("@@") && styles.diffHunk,
-          ]}
+    <View style={styles.files}>
+      {files.map((file) => (
+        <Pressable
+          key={file.name}
+          accessibilityRole="button"
+          accessibilityLabel={`${file.name}, open the diff`}
+          testID={`change-file-${file.name}`}
+          onPress={() => onOpen(file.name)}
+          style={({ pressed }) => [styles.fileRow, pressed && styles.pressed]}
         >
-          {line || " "}
-        </Text>
+          <Text style={styles.fileName} numberOfLines={1}>
+            {file.name}
+          </Text>
+          {file.additions ? (
+            <Text style={styles.add}>+{file.additions}</Text>
+          ) : null}
+          {file.deletions ? (
+            <Text style={styles.del}>−{file.deletions}</Text>
+          ) : null}
+          <ChevronRight size={16} color={colors.textMuted} />
+        </Pressable>
       ))}
-      {lines.length > visible.length ? (
-        <Text style={styles.capped}>Diff auf 500 Zeilen begrenzt.</Text>
-      ) : null}
     </View>
   )
-}
-
-function formatDate(value: string): string {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime())
-    ? ""
-    : date.toLocaleString("de-DE", {
-        day: "2-digit",
-        month: "short",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
 }
 
 const styles = StyleSheet.create({
@@ -260,7 +231,12 @@ const styles = StyleSheet.create({
     fontFamily: font.bold,
     letterSpacing: 1.1,
   },
-  title: { color: colors.text, fontSize: 17, fontFamily: font.bold, marginTop: 2 },
+  title: {
+    color: colors.text,
+    fontSize: 17,
+    fontFamily: font.bold,
+    marginTop: 2,
+  },
   list: { padding: spacing.md, paddingBottom: spacing.xxl },
   emptyList: { flexGrow: 1 },
   card: {
@@ -301,31 +277,42 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
     marginTop: 7,
   },
-  fileStat: { color: colors.textSecondary, fontFamily: font.regular,
-    fontSize: type.micro },
+  fileStat: {
+    color: colors.textSecondary,
+    fontFamily: font.regular,
+    fontSize: type.micro,
+  },
   add: { color: colors.mint, fontSize: type.micro, fontFamily: font.bold },
   del: { color: colors.danger, fontSize: type.micro, fontFamily: font.bold },
-  date: { marginLeft: "auto", color: colors.textMuted, fontFamily: font.regular,
-    fontSize: 10 },
-  preview: {
-    padding: spacing.sm,
-    backgroundColor: "#080A0C",
+  date: {
+    marginLeft: "auto",
+    color: colors.textMuted,
+    fontFamily: font.regular,
+    fontSize: 10,
+  },
+  files: {
     borderTopWidth: 1,
     borderTopColor: colors.border,
   },
-  diffLine: {
-    color: "#B7C0BB",
-    fontFamily: type.mono,
-    fontSize: 11,
-    lineHeight: 18,
+  fileRow: {
+    minHeight: 48,
+    paddingHorizontal: spacing.md,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
   },
-  diffAdd: { color: "#8DE5A8", backgroundColor: "rgba(113,247,159,0.06)" },
-  diffDelete: { color: "#FF9AA7", backgroundColor: "rgba(255,122,138,0.06)" },
-  diffHunk: { color: colors.info },
-  capped: {
-    color: colors.warning,
+  fileName: {
+    flex: 1,
+    color: colors.text,
+    fontFamily: type.mono,
+    fontSize: type.micro,
+  },
+  noFiles: {
+    padding: spacing.md,
+    color: colors.textMuted,
     fontFamily: font.regular,
     fontSize: type.micro,
-    marginTop: spacing.sm,
   },
 })
