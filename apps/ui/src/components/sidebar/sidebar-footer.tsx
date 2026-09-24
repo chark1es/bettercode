@@ -1,6 +1,7 @@
 import { useState, type MouseEvent } from "react"
 import {
   CheckIcon,
+  ChartNoAxesCombinedIcon,
   ChevronDownIcon,
   CodeIcon,
   SettingsIcon as FileSettingsIcon,
@@ -87,8 +88,11 @@ export function SidebarFooter({
   setSettingsOpen: (open: boolean) => void
 }) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
-  const canOpenWindow = typeof window !== "undefined" && Boolean(window.electronAPI?.windowOpenWith)
-  const windowHint = canOpenWindow ? "Right-click to open in a new window" : undefined
+  const canOpenWindow =
+    typeof window !== "undefined" && Boolean(window.electronAPI?.windowOpenWith)
+  const windowHint = canOpenWindow
+    ? "Right-click to open in a new window"
+    : undefined
   const activeTemplate = useAppearanceStore((s) => s.template)
   const displayName = gitUserName.trim() || gitHubUser.trim() || "User"
   const nameParts = displayName.split(/\s+/).filter(Boolean)
@@ -135,7 +139,10 @@ export function SidebarFooter({
     setAppMode("design")
   }
 
-  const openModeWindow = (event: MouseEvent, mode: "agent" | "editor" | "design") => {
+  const openModeWindow = (
+    event: MouseEvent,
+    mode: "agent" | "editor" | "design"
+  ) => {
     if (!window.electronAPI?.windowOpenWith) return
     event.preventDefault()
     event.stopPropagation()
@@ -409,6 +416,22 @@ export function SidebarFooter({
           <span className="flex-1 text-xs">Customize</span>
         </SimpleDropdownItem>
       </SimpleDropdown>
+
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="Usage"
+            className="flex shrink-0 items-center justify-center rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            onClick={() =>
+              window.dispatchEvent(new CustomEvent("betterc0de:open-usage"))
+            }
+          >
+            <ChartNoAxesCombinedIcon className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">Usage</TooltipContent>
+      </Tooltip>
 
       <Tooltip>
         <TooltipTrigger asChild>

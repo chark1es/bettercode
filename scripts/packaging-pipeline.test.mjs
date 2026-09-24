@@ -14,6 +14,12 @@ const {
 const postinstall = require("./postinstall.cjs")
 const root = path.resolve(import.meta.dirname, "..")
 
+// electron-builder logs to stdout, in several writes per line, and node:test
+// reports this file's results to the runner over the same stdout. On Linux CI
+// a log line interleaved with a result and the runner failed the file with
+// "Unable to deserialize cloned data". Keep the logs, on stderr.
+require("builder-util").log.stream = process.stderr
+
 test("electron-builder files cover the shell main-process relative-require closure", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"))
   const patterns = manifest.build.files.filter(
@@ -365,14 +371,93 @@ test("packaging reports failed restoration and attempts both cleanup stages", ()
   assert.equal(restoredNode, true)
 })
 
-test("CI includes signing metadata and electron-builder preserves its boolean type", () => {
-  const action = fs.readFileSync(path.join(root, ".github/actions/package-platform/action.yml"), "utf8")
-  assert.match(action, /buildSigningMetadataArgs/)
-  assert.match(action, /--dir --publish never "\$SIGNING_METADATA"/)
+test("release builds include signing metadata and electron-builder preserves its boolean type", () => {
+  // CI and releases package through release:check (the former
+  // package-platform action), which must bake the signing posture in.
+  const releaseCheck = fs.readFileSync(path.join(root, "scripts/release-check.mjs"), "utf8")
+  assert.match(
+    releaseCheck,
+    /"--dir", "--publish", "never", \.\.\.buildSigningMetadataArgs\(signingEnv\(\)\)/
+  )
+  for (const workflow of ["ci.yml", "release.yml"]) {
+    const source = fs.readFileSync(path.join(root, ".github/workflows", workflow), "utf8")
+    assert.match(source, /npm run release:check -- --arch/, `${workflow} packages through release:check`)
+    assert.doesNotMatch(
+      source,
+      /^\s*(?:-\s*)?(?:run:\s*)?(?:npx\s+)?electron-builder\s/m,
+      `${workflow} must not call electron-builder around release:check`
+    )
+  }
   for (const env of [{}, { WIN_CSC_LINK: "test-cert", CSC_LINK: "test-cert" }]) {
     const args = buildSigningMetadataArgs(env)
     const parsed = configureBuildCommand(require("yargs/yargs")([])).parse(args)
     const normalized = normalizeOptions(parsed)
     assert.equal(typeof normalized.config.extraMetadata.betterc0deCodeSigned, "boolean")
   }
+})
+
+// Regression guard for the 0.1.0-beta.2 Windows installer crash. Through
+// app-builder-lib 26.11.1 the per-user install-mode path read a fixed
+// NSIS_MAX_STRLEN-sized block (16 KB, since electron-builder ships the large
+// string NSIS build) out of the much smaller CoTaskMem buffer returned by
+// SHGetKnownFolderPath. Whenever that allocation landed near the end of a heap
+// region the over-read faulted inside $PLUGINSDIR\System.dll and killed the
+// installer in .onInit, before anything was unpacked. 26.12.0 replaced it with
+// a bounded lstrcpynW copy.
+test("bundled NSIS per-user install mode reads the known folder path within bounds", () => {
+  const template = fs.readFileSync(
+    require.resolve("app-builder-lib/templates/nsis/multiUser.nsh"),
+    "utf8"
+  )
+  assert.match(template, /SHELL32::SHGetKnownFolderPath/)
+  assert.doesNotMatch(
+    template,
+    /\*\$\w+\(&w\$\{NSIS_MAX_STRLEN\}/,
+    "app-builder-lib reintroduced the unbounded SHGetKnownFolderPath struct read"
+  )
+  assert.match(
+    template,
+    /KERNEL32::lstrcpynW/,
+    "app-builder-lib dropped the bounded copy of the per-user install root"
+  )
+})
+
+// Regression guard for the 0.1.0-beta.2 macOS release. An `arch` list on a
+// target overrides the --x64/--arm64 build flag, so each single-arch runner
+// packaged its one app under both architectures' file names and the last
+// upload won: `arm64.dmg` shipped an Intel build. Targets must take the
+// architecture from the command line.
+test("installer targets take their architecture from the build command", () => {
+  const manifest = readJson("package.json")
+  for (const platform of ["mac", "win", "linux"]) {
+    const targets = manifest.build[platform]?.target ?? []
+    for (const target of Array.isArray(targets) ? targets : [targets]) {
+      if (typeof target === "string") continue
+      assert.equal(target.arch, undefined, `${platform} target ${target.target} pins an arch list`)
+      assert.doesNotMatch(String(target.target), /:/, `${platform} target ${target.target} pins an arch suffix`)
+    }
+  }
+})
+
+// GitHub replaces spaces in uploaded asset names, while latest.yml and the
+// checksum files keep the local name; the default NSIS name has spaces.
+test("installer file names contain no spaces", () => {
+  const manifest = readJson("package.json")
+  assert.equal(manifest.build.nsis.artifactName, "${productName}-Setup-${version}.${ext}")
+  for (const platform of ["mac", "win", "linux", "nsis", "dmg"]) {
+    const artifactName = manifest.build[platform]?.artifactName
+    if (artifactName) assert.doesNotMatch(artifactName, /\s/, `${platform}.artifactName`)
+  }
+  assert.doesNotMatch(manifest.build.productName, /\s/, "productName is part of most artifact names")
+})
+
+// fpm-built rpms own their files but not their directories unless told to, so
+// `dnf remove` left an empty /opt/BetterC0de tree behind (found by the
+// installer smoke's Fedora container).
+test("the rpm owns its install directory so removal deletes it", () => {
+  const manifest = readJson("package.json")
+  const fpm = manifest.build.rpm?.fpm ?? []
+  const index = fpm.indexOf("--directories")
+  assert.notEqual(index, -1, "build.rpm.fpm must pass --directories")
+  assert.equal(fpm[index + 1], `/opt/${manifest.build.productName}`)
 })
