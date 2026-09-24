@@ -737,6 +737,38 @@ describe("native provider text generation", () => {
     )
   })
 
+  it("uses Finder's resolved Codex CLI for a provider handoff", async () => {
+    const installedCodex = path.join(os.tmpdir(), "installed-codex")
+    vi.stubEnv("BETTERC0DE_CODEX_CLI_PATH", installedCodex)
+    const run = vi.fn<NativeTextGenerationRunner["run"]>().mockResolvedValue({
+      stdout: '{"summary":"Continue the current work."}',
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+    })
+
+    await expect(
+      runNativeTextGeneration(
+        {
+          settings: settingsWithInstance({
+            instanceId: "codex-work",
+            driver: "codex",
+            binaryPath: "codex",
+          }),
+          modelSelection: { instanceId: "codex-work", model: "gpt-5.4" },
+          prompt: "Summarize the conversation for the next provider",
+          schemaName: "threadContextSummary",
+        },
+        { run }
+      )
+    ).resolves.toBe('{"summary":"Continue the current work."}')
+    expect(run).toHaveBeenCalledWith(
+      installedCodex,
+      expect.any(Array),
+      expect.objectContaining({ cwd: expect.any(String) })
+    )
+  })
+
   it("rejects an oversized Codex output file without reading it unbounded", async () => {
     const runner: NativeTextGenerationRunner = {
       run: async (_command, args) => {
@@ -828,6 +860,41 @@ describe("native provider text generation", () => {
     )
     expect(calls[0].args).not.toContain("--dangerously-skip-permissions")
     expect(calls[0].cwd).not.toBe(process.cwd())
+  })
+
+  it("uses the packaged app's resolved Claude binary for a handoff", async () => {
+    const installedClaude = path.join(os.tmpdir(), "installed-claude")
+    vi.stubEnv("BETTERC0DE_CLAUDE_CODE_PATH", installedClaude)
+    const run = vi.fn<NativeTextGenerationRunner["run"]>().mockResolvedValue({
+      stdout: '{"structured_output":{"summary":"Keep the current goal."}}',
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+    })
+
+    await expect(
+      runNativeTextGeneration(
+        {
+          settings: settingsWithInstance({
+            instanceId: "claude-work",
+            driver: "claude",
+            binaryPath: "",
+          }),
+          modelSelection: {
+            instanceId: "claude-work",
+            model: "claude-sonnet-5",
+          },
+          prompt: "Summarize the conversation for the next provider",
+          schemaName: "threadContextSummary",
+        },
+        { run }
+      )
+    ).resolves.toBe('{"summary":"Keep the current goal."}')
+    expect(run).toHaveBeenCalledWith(
+      installedClaude,
+      expect.any(Array),
+      expect.objectContaining({ cwd: expect.any(String) })
+    )
   })
 
   it("uses the Claude Terminal provider instance as hidden Claude CLI text generation", async () => {
