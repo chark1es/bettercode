@@ -554,7 +554,8 @@ function defaultProviderInstances(
       environment: inheritedProviderEnvironment(["OPENCODE_API_KEY"]),
       config: {
         binaryPath:
-          readConfigString(providers["opencode-cli"], "binaryPath") || "",
+          readConfigString(providers["opencode-cli"], "binaryPath") ||
+          "opencode",
         serverUrl: readConfigString(providers["opencode-cli"], "serverUrl") ?? "",
         serverUsername:
           readConfigString(providers["opencode-cli"], "serverUsername") ?? "",
