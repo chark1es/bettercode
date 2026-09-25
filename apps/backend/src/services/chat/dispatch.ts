@@ -1,4 +1,7 @@
-import { BROWSER_ELEMENT_ATTACHMENT_TYPE, type ChatSendBody } from "@betterc0de/schema"
+import {
+  BROWSER_ELEMENT_ATTACHMENT_TYPE,
+  type ChatSendBody,
+} from "@betterc0de/schema"
 import type { ChatSendResponse } from "@betterc0de/schema/http-contracts"
 import type { AppState } from "../../appState"
 import { HttpError } from "../../errors"
@@ -37,6 +40,10 @@ import {
 } from "./dispatch-lifecycle"
 import { providerHistoryForDispatch } from "./history"
 import { prepareProviderHandoff } from "./provider-handoff"
+import {
+  buildPreparedTurnInstruction,
+  runMessageSendHooks,
+} from "./turn-preparation"
 import { threadGoals } from "./goal-registry"
 import type { GoalTurn } from "./goals"
 
@@ -309,7 +316,9 @@ export async function dispatchChatTurn(
   const body = prepared
   // Element references are persisted with the message; their text is already
   // in the prompt. Never hand their metadata to a provider as a file.
-  const providerAttachments = body.attachments.filter(attachment => attachment.type !== BROWSER_ELEMENT_ATTACHMENT_TYPE)
+  const providerAttachments = body.attachments.filter(
+    (attachment) => attachment.type !== BROWSER_ELEMENT_ATTACHMENT_TYPE
+  )
   const remoteProviderReservation = reserveRemoteTurn()
   let remoteProviderReservationTransferred = false
   try {
@@ -411,12 +420,23 @@ export async function dispatchChatTurn(
         if (admission && admissionKey) admissions.set(admissionKey, admission)
       }
       const admit = async (): Promise<ChatSendResponse> => {
+        // A client that does not prepare its turns (the phone app) gets the
+        // desktop's preparation: its hooks run first, and one that fails
+        // refuses the message before anything is recorded. A goal's turns
+        // were prepared with the /goal command (controlThreadGoal), as on
+        // the desktop; each still gets the instruction.
+        const prepared = body.prepare_turn === true
+        if (prepared && !goalHooks) await runMessageSendHooks(state, body)
+        const baseSystemInstruction =
+          prepared && !body.system_instruction?.trim()
+            ? await buildPreparedTurnInstruction(state, body)
+            : body.system_instruction
         const effectiveSystemInstruction = await resolveTurnSystemInstruction(
           state,
           {
             workspaceRoot: body.project_path,
             targetPath: body.rule_target_path,
-            systemInstruction: body.system_instruction,
+            systemInstruction: baseSystemInstruction,
           }
         )
         let sharedToken: symbol | undefined
@@ -467,7 +487,8 @@ export async function dispatchChatTurn(
           }
 
           goalHooks?.guard()
-          if (!goalHooks) threadGoals.get(state)?.pauseForMessage(body.thread_id)
+          if (!goalHooks)
+            threadGoals.get(state)?.pauseForMessage(body.thread_id)
           const durableDispatch = reserveDurableChatDispatch(
             state,
             body,
@@ -482,12 +503,19 @@ export async function dispatchChatTurn(
             persistedUserMessageId = persistDispatchUserMessage(state, body)
           }
           const dispatchMessageId = persistedUserMessageId
-          const providerHandoff = await prepareProviderHandoff(state, body, effectiveProviderKind, dispatchMessageId)
-          const automaticCompaction = providerHandoff ? null : await compactAutomaticallyBeforeSend(
+          const providerHandoff = await prepareProviderHandoff(
             state,
             body,
+            effectiveProviderKind,
             dispatchMessageId
           )
+          const automaticCompaction = providerHandoff
+            ? null
+            : await compactAutomaticallyBeforeSend(
+                state,
+                body,
+                dispatchMessageId
+              )
           const providerHistory = providerHistoryForDispatch(
             state,
             body,
@@ -495,7 +523,11 @@ export async function dispatchChatTurn(
           )
           setSessionPermission(body.thread_id, body.permission_level)
           const orchestrated = state.orchestrator
-            ? await state.orchestrator.prepareForTurn({ ...body, provider_instance_id: hubProviderInstanceId ?? body.provider_instance_id })
+            ? await state.orchestrator.prepareForTurn({
+                ...body,
+                provider_instance_id:
+                  hubProviderInstanceId ?? body.provider_instance_id,
+              })
             : body
           goalHooks?.guard()
           state.orchestrator?.assertDispatchAllowed(body.thread_id)
@@ -558,7 +590,10 @@ export async function dispatchChatTurn(
                   },
                 }
               )
-              goalHooks?.started({ turnId: turn.turnId, settled: turn.settled ?? turn.completion })
+              goalHooks?.started({
+                turnId: turn.turnId,
+                settled: turn.settled ?? turn.completion,
+              })
               const ownerAttachment =
                 remoteProviderReservation && state.remoteProviderTurns
                   ? state.remoteProviderTurns.attach(
@@ -756,10 +791,7 @@ export async function dispatchChatTurn(
           throw err
         } finally {
           if (sharedToken && !tokenTransferred) {
-            state.threadTurnCoordinator.releaseTurn(
-              body.thread_id,
-              sharedToken
-            )
+            state.threadTurnCoordinator.releaseTurn(body.thread_id, sharedToken)
           }
         }
       }
@@ -769,9 +801,9 @@ export async function dispatchChatTurn(
         return await response
       } finally {
         if (
-          admission
-          && admissionKey
-          && admissions.get(admissionKey) === admission
+          admission &&
+          admissionKey &&
+          admissions.get(admissionKey) === admission
         ) {
           admissions.delete(admissionKey)
         }

@@ -3,7 +3,12 @@ import net from "node:net"
 import { Duplex } from "node:stream"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import WebSocket from "ws"
-import { rejectUpgrade, WsHub, type WsHubOptions } from "./server"
+import {
+  rejectUpgrade,
+  WsHub,
+  type WsConnection,
+  type WsHubOptions,
+} from "./server"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -19,7 +24,8 @@ async function startHub(options: WsHubOptions = {}) {
   hub.attach(server)
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address()
-  if (!address || typeof address === "string") throw new Error("missing test port")
+  if (!address || typeof address === "string")
+    throw new Error("missing test port")
   cleanups.push(
     () =>
       new Promise<void>((resolve) => {
@@ -136,25 +142,46 @@ describe("rejectUpgrade", () => {
 describe("WsHub coalesced live delivery", () => {
   it("replays the same surviving snapshots with contiguous wire sequences", async () => {
     const { hub, url } = await startHub()
-    const headers = { Authorization: "Bearer secret", Origin: "http://localhost:5173" }
+    const headers = {
+      Authorization: "Bearer secret",
+      Origin: "http://localhost:5173",
+    }
     const ws = new WebSocket(url, { headers })
     const auth = await nextJson(ws)
     const replay = auth.replay as { journalId: string }
     const ready = nextJson(ws)
-    ws.send(JSON.stringify({ type: "provider_replay", journalId: replay.journalId, afterSequence: 0 }))
+    ws.send(
+      JSON.stringify({
+        type: "provider_replay",
+        journalId: replay.journalId,
+        afterSequence: 0,
+      })
+    )
     await ready
     const received = nextJsonMessages(ws, 2)
     for (let index = 0; index < 100; index++) {
       hub.broadcast({
         channel: "provider.runtimeEvent",
-        data: { event_type: "tool_call_delta", thread_id: "thread-1", payload: {
-          tool_id: "tool-1", turn_id: "turn-1", cumulative: true, output_delta: `output-${index}`,
-        } },
+        data: {
+          event_type: "tool_call_delta",
+          thread_id: "thread-1",
+          payload: {
+            tool_id: "tool-1",
+            turn_id: "turn-1",
+            cumulative: true,
+            output_delta: `output-${index}`,
+          },
+        },
       })
     }
-    hub.broadcast({ channel: "provider.runtimeEvent", data: {
-      event_type: "turn_completed", thread_id: "thread-1", payload: { turn_id: "turn-1" },
-    } })
+    hub.broadcast({
+      channel: "provider.runtimeEvent",
+      data: {
+        event_type: "turn_completed",
+        thread_id: "thread-1",
+        payload: { turn_id: "turn-1" },
+      },
+    })
     const frames = await received
     expect(frames).toMatchObject([
       { sequence: 1, data: { payload: { output_delta: "output-99" } } },
@@ -164,25 +191,46 @@ describe("WsHub coalesced live delivery", () => {
     await new Promise<void>((resolve) => ws.once("close", () => resolve()))
 
     const resumed = new WebSocket(url, { headers })
-    expect(await nextJson(resumed)).toMatchObject({ replay: { latestSequence: 2 } })
+    expect(await nextJson(resumed)).toMatchObject({
+      replay: { latestSequence: 2 },
+    })
     const catchUp = nextJsonMessages(resumed, 3)
-    resumed.send(JSON.stringify({ type: "provider_replay", journalId: replay.journalId, afterSequence: 0 }))
+    resumed.send(
+      JSON.stringify({
+        type: "provider_replay",
+        journalId: replay.journalId,
+        afterSequence: 0,
+      })
+    )
     expect(await catchUp).toEqual([
       ...frames,
-      expect.objectContaining({ type: "provider_replay_complete", latestSequence: 2 }),
+      expect.objectContaining({
+        type: "provider_replay_complete",
+        latestSequence: 2,
+      }),
     ])
     resumed.close()
   })
 
   it("includes already pending updates in the authentication replay boundary", async () => {
     const { hub, url } = await startHub()
-    hub.broadcast({ channel: "provider.runtimeEvent", data: {
-      event_type: "tool_call_delta", thread_id: "thread-1", payload: {
-        tool_id: "tool-1", cumulative: true, output_delta: "latest",
+    hub.broadcast({
+      channel: "provider.runtimeEvent",
+      data: {
+        event_type: "tool_call_delta",
+        thread_id: "thread-1",
+        payload: {
+          tool_id: "tool-1",
+          cumulative: true,
+          output_delta: "latest",
+        },
       },
-    } })
+    })
     const ws = new WebSocket(url, {
-      headers: { Authorization: "Bearer secret", Origin: "http://localhost:5173" },
+      headers: {
+        Authorization: "Bearer secret",
+        Origin: "http://localhost:5173",
+      },
     })
     expect(await nextJson(ws)).toMatchObject({ replay: { latestSequence: 1 } })
     ws.close()
@@ -320,19 +368,21 @@ describe("WsHub upgrade boundary", () => {
     hub.broadcast({ channel: "thread.activity", data: { id: "activity-1" } })
 
     expect(send).not.toHaveBeenCalled()
-    expect(close).toHaveBeenCalledWith(1013, "client backpressure limit exceeded")
+    expect(close).toHaveBeenCalledWith(
+      1013,
+      "client backpressure limit exceeded"
+    )
   })
 
   it("limits concurrent RPC work per authenticated client", async () => {
     const { hub, url } = await startHub({ maxRpcInFlight: 1 })
     let resolveFirst!: (value: unknown) => void
-    hub.setRpcHandler(
-      (method) =>
-        method === "slow"
-          ? new Promise((resolve) => {
-              resolveFirst = resolve
-            })
-          : "unexpected"
+    hub.setRpcHandler((method) =>
+      method === "slow"
+        ? new Promise((resolve) => {
+            resolveFirst = resolve
+          })
+        : "unexpected"
     )
     const ws = new WebSocket(url, {
       headers: {
@@ -354,6 +404,47 @@ describe("WsHub upgrade boundary", () => {
     resolveFirst("done")
     await expect(completed).resolves.toEqual({ id: "first", result: "done" })
     ws.close()
+  })
+
+  it("hands an RPC the connection it came in on, which hears when it closes", async () => {
+    const { hub, url } = await startHub()
+    let kept: WsConnection | undefined
+    hub.setRpcHandler((_method, _params, _principal, connection) => {
+      kept = connection
+      return "kept"
+    })
+    const headers = {
+      Authorization: "Bearer secret",
+      Origin: "http://localhost:5173",
+    }
+    const first = new WebSocket(url, { headers })
+    const second = new WebSocket(url, { headers })
+    await Promise.all([nextJson(first), nextJson(second)])
+    let secondHeard = false
+    second.on("message", (raw) => {
+      if (String(raw).includes("test.frame")) secondHeard = true
+    })
+
+    const answered = nextJson(first)
+    first.send(JSON.stringify({ id: "keep", method: "test.keep" }))
+    await expect(answered).resolves.toEqual({ id: "keep", result: "kept" })
+    const toFirst = nextJson(first)
+    kept!.send({ channel: "test.frame", data: { n: 1 } })
+    await expect(toFirst).resolves.toEqual({
+      channel: "test.frame",
+      data: { n: 1 },
+    })
+    expect(kept!.isOpen()).toBe(true)
+    expect(kept!.bufferedAmount()).toBeGreaterThanOrEqual(0)
+
+    const closed = new Promise<void>((resolve) => kept!.onClose(resolve))
+    first.close()
+    await closed
+    expect(kept!.isOpen()).toBe(false)
+    // Asked after the close: answered at once.
+    await new Promise<void>((resolve) => kept!.onClose(resolve))
+    expect(secondHeard).toBe(false)
+    second.close()
   })
 
   it("does not expose unexpected RPC error details", async () => {
@@ -429,9 +520,7 @@ describe("WsHub upgrade boundary", () => {
   })
 
   it("closes connected remote clients immediately when their session is revoked", async () => {
-    let revoke:
-      | ((sessionIds: readonly string[]) => void)
-      | undefined
+    let revoke: ((sessionIds: readonly string[]) => void) | undefined
     const unsubscribe = vi.fn()
     const { url } = await startHub({
       authenticateToken: () => ({
@@ -589,25 +678,32 @@ describe("WsHub upgrade boundary", () => {
   it.each<WsHubOptions>([
     { trustProxyHeaders: true },
     { trustLoopbackProxyHeaders: () => true },
-  ])("checks a forwarded client's transport even with a loopback Host (%j)", async (options) => {
-    const { url } = await startHub(options)
-    const headers = {
-      Authorization: "Bearer secret",
-      "X-Forwarded-For": "203.0.113.9",
-    }
-    await expect(rejectedUpgrade(url, headers)).resolves.toBe(426)
-    await expect(rejectedUpgrade(url, {
-      ...headers,
-      "X-Forwarded-Proto": "https, http",
-    })).resolves.toBe(426)
+  ])(
+    "checks a forwarded client's transport even with a loopback Host (%j)",
+    async (options) => {
+      const { url } = await startHub(options)
+      const headers = {
+        Authorization: "Bearer secret",
+        "X-Forwarded-For": "203.0.113.9",
+      }
+      await expect(rejectedUpgrade(url, headers)).resolves.toBe(426)
+      await expect(
+        rejectedUpgrade(url, {
+          ...headers,
+          "X-Forwarded-Proto": "https, http",
+        })
+      ).resolves.toBe(426)
 
-    const ws = new WebSocket(url, { headers: {
-      ...headers,
-      "X-Forwarded-Proto": "http, https",
-    } })
-    await expect(nextJson(ws)).resolves.toMatchObject({ type: "auth_ok" })
-    ws.close()
-  })
+      const ws = new WebSocket(url, {
+        headers: {
+          ...headers,
+          "X-Forwarded-Proto": "http, https",
+        },
+      })
+      await expect(nextJson(ws)).resolves.toMatchObject({ type: "auth_ok" })
+      ws.close()
+    }
+  )
 
   it("downgrades remote RPC access on an explicitly enabled plaintext host", async () => {
     const { hub, url } = await startHub({
@@ -762,7 +858,10 @@ describe("WsHub upgrade boundary", () => {
     const gap = nextJson(ws)
     hub.broadcast({
       channel: "provider.runtimeEvent",
-      data: { event_type: "tool_result", payload: { output: "x".repeat(1_000) } },
+      data: {
+        event_type: "tool_result",
+        payload: { output: "x".repeat(1_000) },
+      },
     })
 
     await expect(gap).resolves.toMatchObject({
@@ -992,3 +1091,140 @@ function nextJsonMessages(
     ws.once("error", onError)
   })
 }
+
+describe("WsHub protocol negotiation", () => {
+  const PHONE = {
+    name: "betterc0de-remote",
+    version: "0.1.0-beta.3",
+    platform: "ios",
+  }
+  const TOO_OLD = {
+    name: "betterc0de-remote",
+    version: "0.0.1",
+    platform: "ios",
+  }
+
+  function remoteHub(extra: WsHubOptions = {}) {
+    return startHub({
+      authenticateToken: (token) =>
+        token === "remote-session"
+          ? {
+              kind: "remote",
+              sessionId: "session-1",
+              accessLevel: "full",
+              expiresAt: Date.now() + 60_000,
+            }
+          : null,
+      describeProtocol: (principal) => ({
+        apiVersion: 2,
+        principal: principal.kind,
+      }),
+      ...extra,
+    })
+  }
+
+  function opened(ws: WebSocket): Promise<void> {
+    return new Promise((resolve, reject) => {
+      ws.once("open", () => resolve())
+      ws.once("error", reject)
+    })
+  }
+
+  function closed(ws: WebSocket): Promise<{ code: number; reason: string }> {
+    return new Promise((resolve) => {
+      ws.once("close", (code, reason) =>
+        resolve({ code, reason: reason.toString("utf8") })
+      )
+    })
+  }
+
+  it("describes the protocol in auth_ok and records which app connected", async () => {
+    const noteRemoteClient = vi.fn()
+    const { url } = await remoteHub({ noteRemoteClient })
+    const ws = new WebSocket(url)
+    await opened(ws)
+    const auth = nextJson(ws)
+    ws.send(
+      JSON.stringify({ type: "auth", token: "remote-session", client: PHONE })
+    )
+    await expect(auth).resolves.toMatchObject({
+      type: "auth_ok",
+      replay: { journalId: expect.any(String) },
+      protocol: { apiVersion: 2, principal: "remote" },
+    })
+    expect(noteRemoteClient).toHaveBeenCalledWith("session-1", PHONE)
+    ws.close()
+  })
+
+  it("tells a too-old app to update with 4426, which keeps its pairing", async () => {
+    const noteRemoteClient = vi.fn()
+    const { hub, url } = await remoteHub({ noteRemoteClient })
+    const ws = new WebSocket(url)
+    await opened(ws)
+    const result = closed(ws)
+    ws.send(
+      JSON.stringify({ type: "auth", token: "remote-session", client: TOO_OLD })
+    )
+    await expect(result).resolves.toEqual({
+      code: 4426,
+      reason: "client update required",
+    })
+    expect(hub.clientCount()).toBe(0)
+    expect(noteRemoteClient).not.toHaveBeenCalled()
+  })
+
+  it("applies the same gate to an app that authenticated during the upgrade", async () => {
+    const { hub, url } = await remoteHub()
+    const ws = new WebSocket(url, {
+      headers: {
+        Authorization: "Bearer remote-session",
+        "X-BetterC0de-Client": "betterc0de-remote/0.0.1 (android)",
+      },
+    })
+    await expect(closed(ws)).resolves.toEqual({
+      code: 4426,
+      reason: "client update required",
+    })
+    expect(hub.clientCount()).toBe(0)
+  })
+
+  it("re-sends the protocol to paired devices only", async () => {
+    const { hub, url } = await remoteHub()
+    const phone = new WebSocket(url)
+    await opened(phone)
+    const phoneAuth = nextJson(phone)
+    phone.send(
+      JSON.stringify({ type: "auth", token: "remote-session", client: PHONE })
+    )
+    await phoneAuth
+    const desktop = new WebSocket(url, {
+      headers: {
+        Authorization: "Bearer secret",
+        Origin: "http://localhost:5173",
+      },
+    })
+    await expect(nextJson(desktop)).resolves.toMatchObject({
+      type: "auth_ok",
+      protocol: { principal: "local" },
+    })
+    const desktopFrames: Array<Record<string, unknown>> = []
+    desktop.on("message", (data) => {
+      desktopFrames.push(
+        JSON.parse(data.toString("utf8")) as Record<string, unknown>
+      )
+    })
+
+    const update = nextJson(phone)
+    hub.refreshProtocol()
+    await expect(update).resolves.toEqual({
+      type: "protocol_update",
+      protocol: { apiVersion: 2, principal: "remote" },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(
+      desktopFrames.filter((frame) => frame.type === "protocol_update")
+    ).toEqual([])
+    phone.close()
+    desktop.close()
+  })
+})

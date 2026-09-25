@@ -1,51 +1,115 @@
-import { RemoteSocket } from "@/lib/remote-socket"
+import { forgetAllDrafts } from "@/lib/editor-drafts"
+import { fileDocumentStorage } from "@/lib/file-documents"
+import {
+  memoryDocumentStorage,
+  setDocumentStorage,
+} from "@/lib/local-documents"
 import { isReplayGapFrame } from "@/lib/runtime-events"
 import { useAppStore } from "@/store/app-store"
+import { useComposerSettings } from "@/store/composer-settings-store"
+import { startQueueRunner } from "@/store/queue-runner"
+import { useQueueStore } from "@/store/queue-store"
 import { useSessionStore } from "@/store/session-store"
+import {
+  deliverTerminalFrame,
+  setTerminalChannel,
+} from "@/terminal/terminal-link"
+import type { RemoteApi, RemoteChannel } from "@/transport/types"
 import { useEffect, useRef } from "react"
 import { AppState } from "react-native"
 
+/**
+ * Keeps the app connected: restores the pairing at start, opens the live
+ * event stream of the current transport (paired desktop or demo), feeds its
+ * events into the app store, sends queued messages, and re-checks the
+ * session when the app comes back to the foreground and once a minute.
+ */
 export function AppRuntime() {
-  const profile = useSessionStore((state) => state.profile)
+  const transport = useSessionStore((state) => state.transport)
+  const mode = useSessionStore((state) => state.mode)
+  const sessionState = useSessionStore((state) => state.state)
   const hydrate = useSessionStore((state) => state.hydrate)
   const check = useSessionStore((state) => state.check)
   const setSocketState = useSessionStore((state) => state.setSocketState)
-  const socketRef = useRef<RemoteSocket | null>(null)
-  const connectionKey = profile
-    ? `${profile.baseUrl}\u0000${profile.environmentId}\u0000${profile.sessionToken}`
-    : null
+  const setProtocol = useSessionStore((state) => state.setProtocol)
+  const markAppUpdateRequired = useSessionStore(
+    (state) => state.markAppUpdateRequired
+  )
+  const channelRef = useRef<RemoteChannel | null>(null)
 
   useEffect(() => {
     void hydrate()
   }, [hydrate])
 
+  // Chat settings, queued messages and unsaved edits belong to the
+  // connection they were made for: a paired desktop's are kept in the app's
+  // documents across restarts, the demo's only in memory, and ending a
+  // pairing ends them.
   useEffect(() => {
-    if (!profile) {
-      socketRef.current?.stop()
-      socketRef.current = null
+    if (!mode) return
+    setDocumentStorage(
+      mode === "live" ? fileDocumentStorage : memoryDocumentStorage()
+    )
+    useComposerSettings.getState().hydrate()
+    useQueueStore.getState().hydrate()
+  }, [mode])
+
+  useEffect(() => {
+    if (sessionState !== "unpaired") return
+    useQueueStore.getState().discardAll()
+    useComposerSettings.getState().forgetAll()
+    forgetAllDrafts()
+  }, [sessionState])
+
+  useEffect(() => {
+    if (!transport) {
+      channelRef.current?.stop()
+      channelRef.current = null
       useAppStore.getState().reset()
       return
     }
 
+    const api = transport.api
     const pendingRefreshes = new Set<ReturnType<typeof setTimeout>>()
     const app = useAppStore.getState()
+    app.reset()
     void Promise.allSettled([
-      app.refreshThreads(profile),
-      app.refreshProjects(profile),
+      app
+        .refreshThreads(api)
+        .then(() => useAppStore.getState().refreshAttention(api)),
+      app.refreshProjects(api),
     ])
-    const socket = new RemoteSocket(profile, {
-      onState: setSocketState,
+    let connectedBefore = false
+    const channel = transport.createChannel({
+      onState: (state) => {
+        setSocketState(state)
+        // A reconnect after an outage re-checks the session at once instead
+        // of leaving the composer disabled until the next periodic check.
+        if (state === "live" && useSessionStore.getState().state !== "online")
+          void check()
+        // Activity frames sent while the phone was away are not replayed:
+        // an approval answered on the desktop meanwhile would stay open.
+        if (state === "live") {
+          if (connectedBefore) void useAppStore.getState().refreshAttention(api)
+          connectedBefore = true
+        }
+      },
+      onProtocol: setProtocol,
+      onUpdateRequired: () => markAppUpdateRequired(),
       // The host refused our token. `check()` clears the pairing when the
       // session is really gone; if the host still accepts it (a race with
-      // a token rotation) the socket is told to try again by hand.
+      // a token rotation) the channel is told to try again by hand.
       onUnauthorized: () => {
         void check().then((stillPaired) => {
-          if (stillPaired && socketRef.current === socket) socket.reconnectNow()
+          if (stillPaired && channelRef.current === channel)
+            channel.reconnectNow()
         })
       },
       onFrame: (frame) => {
+        // The terminal's frames are the terminal screen's, not the chats'.
+        if (deliverTerminalFrame(frame)) return
         if (isReplayGapFrame(frame)) {
-          void reconcileHydratedState(profile)
+          void reconcileHydratedState(api)
           return
         }
         const outcome = useAppStore.getState().applyFrame(frame)
@@ -55,26 +119,28 @@ export function AppRuntime() {
             pendingRefreshes.delete(timer)
             const store = useAppStore.getState()
             void Promise.allSettled([
-              store.loadMessages(profile, outcome.threadId, true),
-              store.loadActivities(profile, outcome.threadId),
-              store.refreshThreads(profile),
+              store.loadMessages(api, outcome.threadId, true),
+              store.loadActivities(api, outcome.threadId),
+              store.refreshThreads(api),
             ])
           }, 180)
           pendingRefreshes.add(timer)
         } else if (outcome.refreshThreads) {
           void useAppStore
             .getState()
-            .refreshThreads(profile)
+            .refreshThreads(api)
             .catch(() => undefined)
         }
       },
     })
-    socketRef.current = socket
-    socket.start()
+    channelRef.current = channel
+    setTerminalChannel(channel)
+    channel.start()
+    const stopQueue = startQueueRunner(api)
 
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState !== "active") return
-      socket.reconnectNow()
+      channel.reconnectNow()
       void check()
     })
     const healthTimer = setInterval(() => {
@@ -82,23 +148,20 @@ export function AppRuntime() {
     }, 60_000)
 
     return () => {
+      stopQueue()
       for (const timer of pendingRefreshes) clearTimeout(timer)
       clearInterval(healthTimer)
       subscription.remove()
-      socket.stop()
-      if (socketRef.current === socket) socketRef.current = null
+      channel.stop()
+      setTerminalChannel(null)
+      if (channelRef.current === channel) channelRef.current = null
     }
-    // Session metadata (for example lastSeenAt) may refresh without changing
-    // the actual connection. Keep the socket alive until endpoint or token do.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [check, connectionKey, setSocketState])
+  }, [check, markAppUpdateRequired, setProtocol, setSocketState, transport])
 
   return null
 }
 
-async function reconcileHydratedState(
-  profile: NonNullable<ReturnType<typeof useSessionStore.getState>["profile"]>
-): Promise<void> {
+async function reconcileHydratedState(api: RemoteApi): Promise<void> {
   const store = useAppStore.getState()
   const hydratedThreadIds = new Set([
     ...Object.keys(store.messagesByThread),
@@ -106,11 +169,11 @@ async function reconcileHydratedState(
     ...Object.keys(store.requestsByThread),
   ])
   await Promise.allSettled([
-    store.refreshThreads(profile),
-    store.refreshProjects(profile),
+    store.refreshThreads(api),
+    store.refreshProjects(api),
     ...[...hydratedThreadIds].flatMap((threadId) => [
-      store.loadMessages(profile, threadId, true),
-      store.loadActivities(profile, threadId),
+      store.loadMessages(api, threadId, true),
+      store.loadActivities(api, threadId),
     ]),
   ])
   // The gap may have swallowed a turn's terminal event. The thread list is

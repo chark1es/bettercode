@@ -20,6 +20,14 @@ export const TERMINAL_PTY_MAX_ACTIVE_SESSIONS = 16
 export const TERMINAL_PTY_MAX_ACTIVE_SESSIONS_PER_OWNER = 4
 export const TERMINAL_PTY_MAX_RETAINED_SESSIONS = 64
 const SESSION_TTL_MS = 60_000
+/**
+ * How long a shutdown waits for a force-ended terminal's exit to be
+ * reported. Windows' ConPTY reports it about a second after the process
+ * ended (1.1 s measured with cmd.exe); a shorter wait counts an ended
+ * terminal as one that did not exit, and the backend then refuses to
+ * release its resources.
+ */
+export const TERMINAL_PTY_KILLED_EXIT_REPORT_MS = 3_000
 
 export interface OpenTerminalPtyInput {
   readonly sessionId?: string
@@ -55,7 +63,15 @@ export interface TerminalPtySnapshot {
   readonly status: "running" | "exited" | "cleanup_failed"
   readonly events: readonly TerminalPtyEvent[]
   readonly nextCursor: number
+  /**
+   * The newest event's `seq`, kept or not: events before the first one in
+   * `events` that are missing were dropped from the buffer.
+   */
+  readonly lastSeq: number
 }
+
+/** Called with each event as the terminal records it. */
+export type TerminalPtyListener = (event: TerminalPtyEvent) => void
 
 interface TerminalPtySession {
   readonly sessionId: string
@@ -80,6 +96,7 @@ interface TerminalPtySession {
   terminationTimer: NodeJS.Timeout | null
   ownerExpiryTimer: NodeJS.Timeout | null
   processExitNotified: boolean
+  readonly listeners: Set<TerminalPtyListener>
   readonly onProcessExit?: () => void
   readonly onProcessTreeFailure?: (error: Error) => void
 }
@@ -136,9 +153,9 @@ export function openTerminalPtySession(
     )
   }
   if (
-    input.ownerId
-    && countActiveSessions(input.ownerId)
-      >= TERMINAL_PTY_MAX_ACTIVE_SESSIONS_PER_OWNER
+    input.ownerId &&
+    countActiveSessions(input.ownerId) >=
+      TERMINAL_PTY_MAX_ACTIVE_SESSIONS_PER_OWNER
   ) {
     throw Object.assign(
       new Error(
@@ -195,6 +212,7 @@ export function openTerminalPtySession(
     terminationTimer: null,
     ownerExpiryTimer: null,
     processExitNotified: false,
+    listeners: new Set(),
     onProcessExit: input.onProcessExit,
     onProcessTreeFailure: input.onProcessTreeFailure,
   }
@@ -228,6 +246,25 @@ export function readTerminalPtySession(
   return snapshot(session, cursor)
 }
 
+/**
+ * Calls `listener` with each event the terminal records from now on, until
+ * the returned function is called. Null for a terminal that does not exist
+ * or belongs to another owner. A listener only observes: one that throws
+ * stops neither the others nor the terminal.
+ */
+export function subscribeTerminalPtySession(
+  sessionId: string,
+  listener: TerminalPtyListener,
+  ownerId?: string
+): (() => void) | null {
+  const session = sessions.get(sessionId)
+  if (!session || !ownerMatches(session, ownerId)) return null
+  session.listeners.add(listener)
+  return () => {
+    session.listeners.delete(listener)
+  }
+}
+
 export function writeTerminalPtySession(
   sessionId: string,
   data: string,
@@ -235,10 +272,10 @@ export function writeTerminalPtySession(
 ): boolean {
   const session = sessions.get(sessionId)
   if (
-    !session
-    || !ownerMatches(session, ownerId)
-    || session.status !== "running"
-    || session.closeRequested
+    !session ||
+    !ownerMatches(session, ownerId) ||
+    session.status !== "running" ||
+    session.closeRequested
   ) {
     return false
   }
@@ -262,10 +299,10 @@ export function resizeTerminalPtySession(
 ): boolean {
   const session = sessions.get(sessionId)
   if (
-    !session
-    || !ownerMatches(session, ownerId)
-    || session.status !== "running"
-    || session.closeRequested
+    !session ||
+    !ownerMatches(session, ownerId) ||
+    session.status !== "running" ||
+    session.closeRequested
   ) {
     return false
   }
@@ -287,17 +324,11 @@ export function closeTerminalPtySession(
   session.closeRequested = true
   if (session.status !== "exited") {
     if (!session.terminationTimer && session.terminationPendingCount === 0) {
-      queueTerminalPtyTermination(
-        session,
-        "SIGTERM"
-      )
+      queueTerminalPtyTermination(session, "SIGTERM")
       session.terminationTimer = setTimeout(() => {
         session.terminationTimer = null
         if (session.status !== "exited") {
-          queueTerminalPtyTermination(
-            session,
-            "SIGKILL"
-          )
+          queueTerminalPtyTermination(session, "SIGKILL")
         }
       }, 2_000)
       session.terminationTimer.unref?.()
@@ -368,27 +399,26 @@ async function shutdownTerminalPtySessions(
       session.ownerExpiryTimer = null
     }
     if (session.status === "exited") continue
-    gracefulTerminations.push(
-      queueTerminalPtyTermination(session, "SIGTERM")
-    )
+    gracefulTerminations.push(queueTerminalPtyTermination(session, "SIGTERM"))
   }
 
   await Promise.all(gracefulTerminations)
   await waitForTerminalPtySessions(retained, graceMs)
   const running = retained.filter((session) => session.status !== "exited")
   await Promise.all(
-    running.map((session) =>
-      queueTerminalPtyTermination(session, "SIGKILL")
-    )
+    running.map((session) => queueTerminalPtyTermination(session, "SIGKILL"))
   )
   if (running.length > 0) {
-    await waitForTerminalPtySessions(running, 500)
+    await waitForTerminalPtySessions(
+      running,
+      TERMINAL_PTY_KILLED_EXIT_REPORT_MS
+    )
   }
 
   for (const session of retained) {
     if (
-      session.status === "exited"
-      && sessions.get(session.sessionId) === session
+      session.status === "exited" &&
+      sessions.get(session.sessionId) === session
     ) {
       sessions.delete(session.sessionId)
     }
@@ -470,6 +500,7 @@ function snapshot(
     status: session.status,
     events,
     nextCursor: events.at(-1)?.seq ?? cursor,
+    lastSeq: session.nextSeq,
   }
 }
 
@@ -478,10 +509,10 @@ function isSameOrDescendantPath(root: string, candidate: string): boolean {
   const comparableCandidate = comparablePath(candidate)
   const relative = path.relative(comparableRoot, comparableCandidate)
   return (
-    relative === ""
-    || (!relative.startsWith(`..${path.sep}`)
-      && relative !== ".."
-      && !path.isAbsolute(relative))
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) &&
+      relative !== ".." &&
+      !path.isAbsolute(relative))
   )
 }
 
@@ -577,6 +608,13 @@ function pushEvent(
       session.bufferedBytes - terminalEventBytes(removed)
     )
   }
+  for (const listener of session.listeners) {
+    try {
+      listener(stored)
+    } catch {
+      // An observer must not break the terminal's output.
+    }
+  }
 }
 
 export function boundTerminalPtyData(data: string): string {
@@ -591,8 +629,7 @@ export function boundTerminalPtyData(data: string): string {
   let tail = bytes.subarray(bytes.length - tailBytes).toString("utf8")
   while (
     tail.length > 0 &&
-    Buffer.byteLength(prefix + tail, "utf8") >
-      TERMINAL_PTY_MAX_EVENT_DATA_BYTES
+    Buffer.byteLength(prefix + tail, "utf8") > TERMINAL_PTY_MAX_EVENT_DATA_BYTES
   ) {
     tail = tail.slice(1)
   }
@@ -600,7 +637,9 @@ export function boundTerminalPtyData(data: string): string {
 }
 
 function terminalEventBytes(event: TerminalPtyEvent): number {
-  return typeof event.data === "string" ? Buffer.byteLength(event.data, "utf8") : 0
+  return typeof event.data === "string"
+    ? Buffer.byteLength(event.data, "utf8")
+    : 0
 }
 
 function scheduleCleanup(session: TerminalPtySession): void {
@@ -637,8 +676,8 @@ function countActiveSessions(ownerId?: string): number {
   let count = 0
   for (const session of sessions.values()) {
     if (
-      session.status !== "exited"
-      && (ownerId === undefined || session.ownerId === ownerId)
+      session.status !== "exited" &&
+      (ownerId === undefined || session.ownerId === ownerId)
     ) {
       count += 1
     }
@@ -646,8 +685,9 @@ function countActiveSessions(ownerId?: string): number {
   return count
 }
 
-export function activeTerminalPtySessionCount(): number {
-  return countActiveSessions()
+/** Running terminals: all of them, or those of one owner. */
+export function activeTerminalPtySessionCount(ownerId?: string): number {
+  return countActiveSessions(ownerId)
 }
 
 function ownerMatches(

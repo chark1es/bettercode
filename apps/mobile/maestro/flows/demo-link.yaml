@@ -1,0 +1,30 @@
+# betterc0de://demo opens the demo. This checks the scheme the native
+# project registers, which only a real build has.
+#
+# Android only (scripts/mobile-ios.mjs leaves the android-only tag out). On
+# iOS the link brings up the system's "Open in “BetterC0de Remote”?"
+# question, which Maestro cannot handle reliably on iOS 26: in CI it stayed
+# up over every later flow once, and a tap on it crashed the XCUITest driver
+# once. The iOS build's verification checks that the app registers the
+# scheme, and the app handles the link with the same code as here.
+appId: com.betterc0de.remote
+name: The demo link opens the demo
+tags:
+  - demo
+  - android-only
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: pair-screen
+    timeout: 60000
+- openLink: betterc0de://demo?speed=instant
+- extendedWaitUntil:
+    visible:
+      id: chats-screen
+    timeout: 30000
+- assertVisible:
+    id: connection-demo
+- assertVisible:
+    id: thread-row-demo-dark-mode

@@ -1,5 +1,10 @@
 import { isClaudeOpusOrSonnet } from "@/lib/anthropic-model"
-import { BROWSER_ELEMENT_ATTACHMENT_TYPE, withBrowserElementContext, parseGoalCommand, orchestrationForMain } from "@betterc0de/schema"
+import {
+  BROWSER_ELEMENT_ATTACHMENT_TYPE,
+  withBrowserElementContext,
+  parseGoalCommand,
+  orchestrationForMain,
+} from "@betterc0de/schema"
 import { activeContextMessages } from "@/lib/chat-context"
 import { useMessageQueueStore } from "@/lib/message-queue-store"
 import type { SourceProposedPlanReference } from "@/lib/plan-modal"
@@ -28,215 +33,32 @@ import {
 } from "@betterc0de/schema/model-selection"
 import { invokeContract } from "./contracts"
 import { invoke } from "./runtime"
-import type {
-  WorkspaceProjectAgent,
-  WorkspaceProjectPermissionRule,
-} from "./workspaceApi"
+import {
+  canonicalProviderKind,
+  formatBetterC0deProjectPermissionRulesForPrompt,
+  mergePromptMcps,
+  mergePromptSkills,
+  mergePromptSubagents,
+  projectAgentsToPromptSubagents,
+  selectPromptSkillsForProvider,
+  type PromptMcp,
+  type PromptSkill,
+  type PromptSubagent,
+  type RuntimePromptContext,
+} from "@betterc0de/schema/prompt-context"
+import type { WorkspaceProjectPermissionRule } from "./workspaceApi"
+// The prompt-context helpers moved to @betterc0de/schema, where the
+// backend uses them too; they stay importable from here.
+export {
+  formatBetterC0deProjectPermissionRulesForPrompt,
+  mergePromptSubagents,
+  projectAgentsToPromptSubagents,
+  selectPromptSkillsForProvider,
+} from "@betterc0de/schema/prompt-context"
 export type {
   AgentPermissionGrant,
   WorkspaceTrustRecord,
 } from "@betterc0de/schema"
-
-type PromptSkill = { name: string; content: string }
-type RuntimePromptSkill = PromptSkill & {
-  providerKinds?: string[]
-  providerInstanceIds?: string[]
-  source?: string
-  sourcePath?: string
-}
-type PromptMcp = { name: string; command: string; args?: string[] }
-type PromptSubagent = {
-  name: string
-  description?: string
-  prompt?: string
-  mode?: string
-  model?: string
-  source?: string
-  sourcePath?: string
-  tools?: Record<string, boolean>
-  permissions?: WorkspaceProjectPermissionRule[]
-}
-type RuntimePromptContext = {
-  customRules: string
-  skills: RuntimePromptSkill[]
-  mcps: PromptMcp[]
-  subagents: PromptSubagent[]
-}
-
-function providerScopeKey(value: string | null | undefined): string {
-  return (value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[_\s]+/g, "-")
-}
-
-function canonicalProviderKind(value: string | null | undefined): string {
-  const key = providerScopeKey(value)
-  const compactKey = key.replace(/-/g, "")
-  if (["codex-cli", "openai-cli"].includes(key)) return "codex"
-  if (
-    ["claude-cli", "claude-agent", "anthropic-cli"].includes(key) ||
-    compactKey === "claudeagent"
-  ) {
-    return "claude"
-  }
-  if (["openai-api", "openai-oauth", "openaiapi", "openaioauth"].includes(key))
-    return "openai"
-  // NOT "grok" — the hub CLI provider is distinct from the xAI API adapter.
-  // (providerScopeKey already folds "grok_cli" to "grok-cli".)
-  if (key === "grok-cli" || compactKey === "grokcli") return "grok-cli"
-  // Same family split for OpenCode: upstream `opencode-cli` is distinct from
-  // the BetterC0de compatibility kind ("opencode" / "open-code" compact to
-  // "opencode" and keep folding to it).
-  if (key === "opencode-cli" || compactKey === "opencodecli")
-    return "opencode-cli"
-  return key
-}
-
-function providerUsesNativeSkills(providerKind: string): boolean {
-  return ["codex", "claude"].includes(canonicalProviderKind(providerKind))
-}
-
-function isProjectPromptSkill(skill: RuntimePromptSkill): boolean {
-  if (
-    skill.source === "betterc0de" ||
-    skill.source === "BetterC0de" ||
-    skill.source === "project"
-  ) {
-    return true
-  }
-  const path = providerScopeKey(skill.sourcePath)
-  return (
-    path.includes("/.betterc0de/") ||
-    path.startsWith(".betterc0de/") ||
-    path.includes("/.BetterC0de/") ||
-    path.startsWith(".BetterC0de/") ||
-    path.includes("/.agents/skills/") ||
-    path.startsWith(".agents/skills/") ||
-    path.includes("/.claude/skills/") ||
-    path.startsWith(".claude/skills/")
-  )
-}
-
-function runtimeSkillAppliesToProvider(
-  skill: RuntimePromptSkill,
-  input: { providerKind: string; providerInstanceId?: string | null }
-): boolean {
-  const instanceScopes = (skill.providerInstanceIds ?? [])
-    .map(providerScopeKey)
-    .filter(Boolean)
-  if (instanceScopes.length > 0) {
-    const targetInstance = providerScopeKey(input.providerInstanceId)
-    return Boolean(targetInstance && instanceScopes.includes(targetInstance))
-  }
-
-  const kindScopes = (skill.providerKinds ?? [])
-    .map(canonicalProviderKind)
-    .filter(Boolean)
-  if (kindScopes.length > 0) {
-    return kindScopes.includes(canonicalProviderKind(input.providerKind))
-  }
-
-  return true
-}
-
-export function selectPromptSkillsForProvider(
-  skills: ReadonlyArray<RuntimePromptSkill>,
-  input: { providerKind: string; providerInstanceId?: string | null }
-): PromptSkill[] {
-  if (providerUsesNativeSkills(input.providerKind)) {
-    return skills
-      .filter(isProjectPromptSkill)
-      .map((skill) => ({ name: skill.name, content: skill.content }))
-  }
-  return skills
-    .filter((skill) => runtimeSkillAppliesToProvider(skill, input))
-    .map((skill) => ({ name: skill.name, content: skill.content }))
-}
-
-export function formatBetterC0deProjectPermissionRulesForPrompt(
-  rules: readonly WorkspaceProjectPermissionRule[]
-): string | null {
-  if (rules.length === 0) return null
-  return [
-    "## BetterC0de Project Permission Rules",
-    "Apply these project-local tool permission rules as additional restrictions. They never override BetterC0de's current permission mode to allow a more dangerous action.",
-    "",
-    "| Permission | Pattern | Action | Source |",
-    "|:-----------|:--------|:-------|:-------|",
-    ...rules.map(
-      (rule) =>
-        `| \`${escapePromptTableCell(rule.permission)}\` | \`${escapePromptTableCell(rule.pattern)}\` | **${rule.action}** | \`${escapePromptTableCell(rule.sourcePath)}\` |`
-    ),
-  ].join("\n")
-}
-
-function escapePromptTableCell(value: string): string {
-  return value.replaceAll("|", "\\|").replace(/\r?\n/g, " ")
-}
-
-function mergePromptSkills(
-  primary: ReadonlyArray<RuntimePromptSkill>,
-  additions: ReadonlyArray<RuntimePromptSkill>
-): RuntimePromptSkill[] {
-  if (additions.length === 0) return [...primary]
-  const mergedByName = new Map(primary.map((skill) => [skill.name, skill]))
-  for (const skill of additions) {
-    mergedByName.set(skill.name, skill)
-  }
-  return Array.from(mergedByName.values())
-}
-
-function mergePromptMcps(
-  primary: ReadonlyArray<PromptMcp>,
-  additions: ReadonlyArray<PromptMcp>
-): PromptMcp[] {
-  if (additions.length === 0) return [...primary]
-  const mergedByName = new Map(primary.map((mcp) => [mcp.name, mcp]))
-  for (const mcp of additions) {
-    mergedByName.set(mcp.name, mcp)
-  }
-  return Array.from(mergedByName.values())
-}
-
-export function projectAgentsToPromptSubagents(
-  agents: ReadonlyArray<WorkspaceProjectAgent>
-): PromptSubagent[] {
-  return agents
-    .filter((agent) => agent.enabled !== false && agent.hidden !== true)
-    .map((agent) => ({
-      name: agent.name || agent.id,
-      description:
-        agent.description ||
-        [
-          agent.mode ? `BetterC0de ${agent.mode}` : "BetterC0de project agent",
-          agent.model ? `model ${agent.model}` : "",
-        ]
-          .filter(Boolean)
-          .join(" · "),
-      prompt: agent.prompt,
-      mode: agent.mode,
-      model: agent.model,
-      source: "betterc0de",
-      sourcePath: agent.sourcePath,
-      tools: agent.tools,
-      permissions: agent.permissions,
-    }))
-}
-
-export function mergePromptSubagents(
-  primary: ReadonlyArray<PromptSubagent>,
-  additions: ReadonlyArray<PromptSubagent>
-): PromptSubagent[] {
-  if (additions.length === 0) return [...primary]
-  const mergedByName = new Map(
-    primary.map((subagent) => [subagent.name, subagent])
-  )
-  for (const subagent of additions) {
-    mergedByName.set(subagent.name, subagent)
-  }
-  return Array.from(mergedByName.values())
-}
 
 function defaultModelSelectionInstanceId(providerKind: string): string {
   return canonicalProviderKind(providerKind) || "codex"
@@ -474,7 +296,11 @@ export interface DispatchUserMessage {
   createdAt: string
 }
 
-type ChatSendContextCheckpoint = NonNullable<import("@betterc0de/schema/http-contracts").ChatSendResponse["automaticCompaction" | "providerHandoff"]>
+type ChatSendContextCheckpoint = NonNullable<
+  import("@betterc0de/schema/http-contracts").ChatSendResponse[
+    | "automaticCompaction"
+    | "providerHandoff"]
+>
 
 function automaticCompactionUsage(
   usage:
@@ -496,15 +322,11 @@ function automaticCompactionUsage(
   const usedTokens = [usage.usedTokens, usage.totalTokens, usage.inputTokens]
     .filter(
       (value): value is number =>
-        typeof value === "number" &&
-        Number.isSafeInteger(value) &&
-        value >= 0
+        typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     )
-    .reduce<number | undefined>(
-      (largest, value) =>
-        largest === undefined ? value : Math.max(largest, value),
-      undefined
-    )
+    .reduce<
+      number | undefined
+    >((largest, value) => (largest === undefined ? value : Math.max(largest, value)), undefined)
   const maxTokens =
     typeof usage.maxTokens === "number" &&
     Number.isSafeInteger(usage.maxTokens) &&
@@ -575,7 +397,9 @@ function projectContextCheckpoint(
         id: compaction.commandMessageId,
         role: "user",
         content: compaction.commandContent,
-        ...(compaction.reason === "provider-switch" ? { internalContext: "provider-handoff" as const } : {}),
+        ...(compaction.reason === "provider-switch"
+          ? { internalContext: "provider-handoff" as const }
+          : {}),
         createdAt: compaction.commandCreatedAt,
       },
       { persist: false }
@@ -589,7 +413,9 @@ function projectContextCheckpoint(
         role: "assistant",
         content: compaction.checkpointContent,
         compactedContext: true,
-        ...(compaction.reason === "provider-switch" ? { internalContext: "provider-handoff" as const } : {}),
+        ...(compaction.reason === "provider-switch"
+          ? { internalContext: "provider-handoff" as const }
+          : {}),
         compactionGeneration: compaction.generation,
         createdAt: compaction.checkpointCreatedAt,
       },
@@ -598,11 +424,22 @@ function projectContextCheckpoint(
   }
 }
 
-export async function sendGoalControl(threadId: string, message: string, modelId: string): Promise<void> {
+export async function sendGoalControl(
+  threadId: string,
+  message: string,
+  modelId: string
+): Promise<void> {
   const { useChatStore } = await import("@/lib/chat-store")
-  const revision = useChatStore.getState().getThreadSettings(threadId).goalRevision
-  const result = await invokeContract("chatGoal", { body: { threadId, message, modelId } })
-  if (useChatStore.getState().getThreadSettings(threadId).goalRevision === revision) {
+  const revision = useChatStore
+    .getState()
+    .getThreadSettings(threadId).goalRevision
+  const result = await invokeContract("chatGoal", {
+    body: { threadId, message, modelId },
+  })
+  if (
+    useChatStore.getState().getThreadSettings(threadId).goalRevision ===
+    revision
+  ) {
     useChatStore.getState().setThreadSetting(threadId, "goal", result.goal)
   }
   if (!result.goal && parseGoalCommand(message)?.action === "status") {
@@ -681,8 +518,14 @@ export const sendChatMessage = async (
           .designBrief ?? null)
   const designDefaults =
     settingsStoreMod.useSettingsStore.getState().designDefaults
-  const orchestration = settingsStoreMod.useSettingsStore.getState().orchestratorEnabled
-    ? orchestrationForMain(orchestrationSelection ?? chatStoreMod.useChatStore.getState().getThreadSettings(threadId).orchestration ?? { enabled: false }, openAiTarget.providerKind)
+  const orchestration = settingsStoreMod.useSettingsStore.getState()
+    .orchestratorEnabled
+    ? orchestrationForMain(
+        orchestrationSelection ??
+          chatStoreMod.useChatStore.getState().getThreadSettings(threadId)
+            .orchestration ?? { enabled: false },
+        openAiTarget.providerKind
+      )
     : { enabled: false as const }
 
   await hookRuntime.runBlockingMessageSendHooks({
@@ -876,16 +719,38 @@ export const sendChatMessage = async (
   if (parseGoalCommand(message)) {
     const { upsertThreadMeta } = await import("./coreApi")
     if (dispatchThread) await upsertThreadMeta(dispatchThread)
-    const goalRevision = chatStoreMod.useChatStore.getState().getThreadSettings(threadId).goalRevision
-    const result = await invokeContract("chatGoal", { body: {
-      threadId, message, modelId, modelSelection, providerKind: openAiTarget.providerKind,
-      providerInstanceId, reasoningEffort, chatMode, projectPath, systemInstruction,
-      permissionLevel, openaiTransport: openAiTarget.openaiTransport, fastMode,
-      collaborationMode: specialMode ?? null, appMode, designContext: resolvedDesignContext,
-      ruleTargetPath: resolvedRuleTargetPath, ...userMessageMetadata,
-    } })
-    if (chatStoreMod.useChatStore.getState().getThreadSettings(threadId).goalRevision === goalRevision) {
-      chatStoreMod.useChatStore.getState().setThreadSetting(threadId, "goal", result.goal)
+    const goalRevision = chatStoreMod.useChatStore
+      .getState()
+      .getThreadSettings(threadId).goalRevision
+    const result = await invokeContract("chatGoal", {
+      body: {
+        threadId,
+        message,
+        modelId,
+        modelSelection,
+        providerKind: openAiTarget.providerKind,
+        providerInstanceId,
+        reasoningEffort,
+        chatMode,
+        projectPath,
+        systemInstruction,
+        permissionLevel,
+        openaiTransport: openAiTarget.openaiTransport,
+        fastMode,
+        collaborationMode: specialMode ?? null,
+        appMode,
+        designContext: resolvedDesignContext,
+        ruleTargetPath: resolvedRuleTargetPath,
+        ...userMessageMetadata,
+      },
+    })
+    if (
+      chatStoreMod.useChatStore.getState().getThreadSettings(threadId)
+        .goalRevision === goalRevision
+    ) {
+      chatStoreMod.useChatStore
+        .getState()
+        .setThreadSetting(threadId, "goal", result.goal)
     }
     if (!result.goal && parseGoalCommand(message)?.action === "status") {
       const { toast } = await import("sonner")
@@ -985,7 +850,9 @@ export const sendChatMessage = async (
           openaiTransport: openAiTarget.openaiTransport,
           sourceProposedPlan,
           history,
-          attachments: attachments?.filter(attachment => attachment.type !== BROWSER_ELEMENT_ATTACHMENT_TYPE),
+          attachments: attachments?.filter(
+            (attachment) => attachment.type !== BROWSER_ELEMENT_ATTACHMENT_TYPE
+          ),
         })
         return
       }
@@ -1073,11 +940,7 @@ export const sendChatMessage = async (
       ...userMessageMetadata,
     },
   })
-  projectContextCheckpoint(
-    chatStoreMod,
-    threadId,
-    result.automaticCompaction
-  )
+  projectContextCheckpoint(chatStoreMod, threadId, result.automaticCompaction)
   projectContextCheckpoint(chatStoreMod, threadId, result.providerHandoff)
   return result
 }
@@ -1221,7 +1084,12 @@ export function buildWireHistory(
   for (const m of recentMessages) {
     if (m.role === "user") {
       if (typeof m.content === "string" && m.content.length > 0) {
-        groups.push([{ role: "user", content: clip(withBrowserElementContext(m.content, m.attachments)) }])
+        groups.push([
+          {
+            role: "user",
+            content: clip(withBrowserElementContext(m.content, m.attachments)),
+          },
+        ])
       }
       continue
     }
@@ -1325,7 +1193,11 @@ export const interruptTurn = async (
 ) => {
   // All stop entry points (composer, shortcuts and slash commands) pause
   // follow-ups before their stream can settle and trigger the next send.
-  try { useMessageQueueStore.getState().pause(threadId) } catch { /* Already paused in memory. */ }
+  try {
+    useMessageQueueStore.getState().pause(threadId)
+  } catch {
+    /* Already paused in memory. */
+  }
   if (window.electronAPI?.pluginSend) {
     try {
       const { usePluginStore } = await import("@/lib/plugin-store")
@@ -1536,9 +1408,7 @@ export const respondToApproval = (
       ? { updatedPermissions: options.updatedPermissions }
       : {}),
   }
-  return invokeContract("chatApproval",
-    { args: body, method: "POST", body }
-  )
+  return invokeContract("chatApproval", { args: body, method: "POST", body })
 }
 
 export const respondToPlanApproval = (
@@ -1565,9 +1435,11 @@ export const respondToPlanApproval = (
       : {}),
     ...(options?.message ? { message: options.message } : {}),
   }
-  return invokeContract("chatPlanApproval",
-    { args: body, method: "POST", body }
-  )
+  return invokeContract("chatPlanApproval", {
+    args: body,
+    method: "POST",
+    body,
+  })
 }
 
 export const setChatPermissionMode = (
@@ -1577,7 +1449,11 @@ export const setChatPermissionMode = (
   providerInstanceId?: string | null
 ) => {
   const body = { threadId, providerKind, permissionLevel, providerInstanceId }
-  return invokeContract("chatPermissionMode", { args: body, method: "POST", body })
+  return invokeContract("chatPermissionMode", {
+    args: body,
+    method: "POST",
+    body,
+  })
 }
 
 export interface ClaudePermissionRuleEntry {
@@ -1662,27 +1538,21 @@ export const deleteAgentPermissionGrant = (id: string) =>
   )
 
 export const getAgentWorkspaceTrust = (workspacePath: string) =>
-  invoke<{ trust: WorkspaceTrustRecord }>(
-    "/permissions/workspace-trust/get",
-    {
-      args: { workspacePath },
-      method: "POST",
-      body: { workspacePath },
-    }
-  )
+  invoke<{ trust: WorkspaceTrustRecord }>("/permissions/workspace-trust/get", {
+    args: { workspacePath },
+    method: "POST",
+    body: { workspacePath },
+  })
 
 export const setAgentWorkspaceTrust = (
   workspacePath: string,
   state: WorkspaceTrustState
 ) =>
-  invoke<{ trust: WorkspaceTrustRecord }>(
-    "/permissions/workspace-trust/set",
-    {
-      args: { workspacePath, state },
-      method: "POST",
-      body: { workspacePath, state },
-    }
-  )
+  invoke<{ trust: WorkspaceTrustRecord }>("/permissions/workspace-trust/set", {
+    args: { workspacePath, state },
+    method: "POST",
+    body: { workspacePath, state },
+  })
 
 export const respondToUserInput = (
   threadId: string,
@@ -1691,13 +1561,11 @@ export const respondToUserInput = (
   answers: Record<string, unknown>,
   providerInstanceId?: string | null
 ) =>
-  invokeContract("chatUserInput",
-    {
-      args: { threadId, providerKind, requestId, answers, providerInstanceId },
-      method: "POST",
-      body: { threadId, providerKind, requestId, answers, providerInstanceId },
-    }
-  )
+  invokeContract("chatUserInput", {
+    args: { threadId, providerKind, requestId, answers, providerInstanceId },
+    method: "POST",
+    body: { threadId, providerKind, requestId, answers, providerInstanceId },
+  })
 
 export const rejectUserInput = (
   threadId: string,
@@ -1705,13 +1573,11 @@ export const rejectUserInput = (
   requestId: string,
   providerInstanceId?: string | null
 ) =>
-  invokeContract("chatUserInputReject",
-    {
-      args: { threadId, providerKind, requestId, providerInstanceId },
-      method: "POST",
-      body: { threadId, providerKind, requestId, providerInstanceId },
-    }
-  )
+  invokeContract("chatUserInputReject", {
+    args: { threadId, providerKind, requestId, providerInstanceId },
+    method: "POST",
+    body: { threadId, providerKind, requestId, providerInstanceId },
+  })
 
 export const loadThreadActivities = (threadId: string) =>
   invokeContract("listActivities", { id: threadId })

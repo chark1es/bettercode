@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto"
+import { remoteClientNeedsUpdate } from "@betterc0de/schema/remote-protocol"
 import { Hono, type Context } from "hono"
 import { bodyLimit } from "hono/body-limit"
 import { routePath } from "hono/route"
@@ -30,17 +31,22 @@ import { sanitizeError } from "./errors"
 import { createRateLimiter, rateLimitMiddleware } from "./middleware/rateLimit"
 import {
   bootstrapRateLimitKeys,
+  clientUpdateRequiredBody,
   createPairingAdmissionMiddleware,
+  isClientUpdateGateExempt,
   isDesktopOnlyRequest,
   isInsecureNonLoopbackRequest,
   isReadOnlyRemoteRequestAllowed,
   isRemoteRequestTransportAllowed,
+  requestClientInfo,
   requestIdentity,
   requiresReadOnlyRemoteAccess,
   registerRemotePublicRoutes,
   registerRemoteRoutes,
   resolveRequestIdentity,
+  type RemoteRoutesOptions,
 } from "../remote/http"
+import { API_BODY_LIMIT_BYTES } from "../remote/protocol"
 import { registerRemoteWebRoutes } from "../remote/web"
 
 /** Generate a short 8-char hex request ID (4 random bytes). */
@@ -56,7 +62,6 @@ function shouldLogHttpRequest(status: number, durationMs: number): boolean {
   return shouldTraceHttpRequests() || status >= 400 || durationMs >= 1_000
 }
 
-const API_BODY_LIMIT_BYTES = 2 * 1024 * 1024
 const PAIRING_BODY_LIMIT_BYTES = 16 * 1024
 
 /**
@@ -73,7 +78,11 @@ function identityRateLimitKey(state: AppState, config: ServerConfig) {
   }
 }
 
-function buildApiRoutes(state: AppState, config: ServerConfig): Hono {
+function buildApiRoutes(
+  state: AppState,
+  config: ServerConfig,
+  remote: RemoteRoutesOptions
+): Hono {
   const api = new Hono()
   const keyForIdentity = identityRateLimitKey(state, config)
   // Every accepted call is an outbound request carrying a user secret to a
@@ -98,7 +107,7 @@ function buildApiRoutes(state: AppState, config: ServerConfig): Hono {
       }
     )
   )
-  registerRemoteRoutes(api, config, state)
+  registerRemoteRoutes(api, config, state, remote)
   registerRuntimeRoutes(api, state)
   registerSettingsRoutes(api, state)
   registerThemesRoutes(api, config)
@@ -120,7 +129,11 @@ function buildApiRoutes(state: AppState, config: ServerConfig): Hono {
 export function buildApp(
   config: ServerConfig,
   state: AppState,
-  opts?: { wsClientCount?: () => number; webRoot?: string }
+  opts?: {
+    wsClientCount?: () => number
+    webRoot?: string
+    remoteTerminals?: RemoteRoutesOptions["remoteTerminals"]
+  }
 ): Hono {
   if (!config.authToken) throw new Error("buildApp: authToken must be set")
   const app = new Hono()
@@ -159,7 +172,7 @@ export function buildApp(
   registerHealthRoute(app, { state, wsClientCount: opts?.wsClientCount })
 
   const bodyTooLarge = (c: Context) =>
-    c.json({ error: "request body too large" }, 413)
+    c.json({ error: "request body too large", code: "request_too_large" }, 413)
   const pairingAdmission = createPairingAdmissionMiddleware(config)
   app.use("/api/v1/remote/pair", pairingAdmission)
   app.use("/api/v1/remote/mobile/pair", pairingAdmission)
@@ -200,9 +213,12 @@ export function buildApp(
       c.header("Vary", "Origin")
       c.header(
         "Access-Control-Allow-Methods",
-        "GET, POST, PATCH, DELETE, OPTIONS"
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS"
       )
-      c.header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+      c.header(
+        "Access-Control-Allow-Headers",
+        "Authorization, Content-Type, X-BetterC0de-Client"
+      )
     }
     if (c.req.method === "OPTIONS") return c.body(null, 204)
     return next()
@@ -271,17 +287,39 @@ export function buildApp(
 
   app.use("/api/*", async (c, next) => {
     if (!isRemoteRequestTransportAllowed(c, config)) {
-      return c.json({ error: "secure transport required" }, 426)
+      return c.json(
+        {
+          error: "secure transport required",
+          code: "secure_transport_required",
+        },
+        426
+      )
     }
     // Resolved once here and cached on the context; routes read it back
     // through `requestIdentity` instead of re-authenticating.
     const identity = resolveRequestIdentity(c, config, state.remoteAccess)
-    if (!identity) return c.json({ error: "unauthorized" }, 401)
+    if (!identity) {
+      return c.json({ error: "unauthorized", code: "unauthorized" }, 401)
+    }
     if (identity.kind === "local" && isInsecureNonLoopbackRequest(c, config)) {
       return c.json(
-        { error: "desktop credentials require secure transport" },
+        {
+          error: "desktop credentials require secure transport",
+          code: "secure_transport_required",
+        },
         426
       )
+    }
+    if (identity.kind === "remote") {
+      // The phone app names its version on every request. Apps that predate
+      // the header are served while the minimum still includes them.
+      const client = requestClientInfo(c)
+      if (client && identity.session) {
+        state.remoteAccess?.noteClient(identity.session.id, client)
+      }
+      if (remoteClientNeedsUpdate(client) && !isClientUpdateGateExempt(c)) {
+        return c.json(clientUpdateRequiredBody(), 426)
+      }
     }
     if (identity.kind === "remote" && isDesktopOnlyRequest(c)) {
       return c.json(
@@ -297,7 +335,10 @@ export function buildApp(
       !isReadOnlyRemoteRequestAllowed(c)
     ) {
       return c.json(
-        { error: "remote session is restricted to read-only monitoring" },
+        {
+          error: "remote session is restricted to read-only monitoring",
+          code: "remote_read_only",
+        },
         403
       )
     }
@@ -355,7 +396,10 @@ export function buildApp(
   // unversioned `/api` path on 404 — that silently masked contract drift
   // and has been removed (see src/services/backend/runtime.ts).  All
   // current and future surfaces live under `/api/v1`.
-  app.route("/api/v1", buildApiRoutes(state, config))
+  app.route(
+    "/api/v1",
+    buildApiRoutes(state, config, { remoteTerminals: opts?.remoteTerminals })
+  )
   registerRemoteWebRoutes(app, config, opts?.webRoot)
   return app
 }

@@ -119,12 +119,16 @@ describe("RemoteAccessService", () => {
 
   it("fails closed on malformed persisted expiries without scheduling a hot loop", () => {
     const { db, service } = serviceFixture()
-    const issued = service.consumePairingCredential(service.issuePairingGrant().credential)!
+    const issued = service.consumePairingCredential(
+      service.issuePairingGrant().credential
+    )!
     const grant = service.issuePairingGrant()
-    db.prepare("UPDATE remote_pairing_grants SET expires_at = ? WHERE pairing_id = ?")
-      .run("not-a-date", grant.id)
-    db.prepare("UPDATE remote_access_sessions SET expires_at = ? WHERE session_id = ?")
-      .run("not-a-date", issued.id)
+    db.prepare(
+      "UPDATE remote_pairing_grants SET expires_at = ? WHERE pairing_id = ?"
+    ).run("not-a-date", grant.id)
+    db.prepare(
+      "UPDATE remote_access_sessions SET expires_at = ? WHERE session_id = ?"
+    ).run("not-a-date", issued.id)
     const schedule = vi.spyOn(globalThis, "setTimeout")
     try {
       expect(service.consumePairingCredential(grant.credential)).toBeNull()
@@ -132,7 +136,11 @@ describe("RemoteAccessService", () => {
       expect(service.isSessionActive(issued.id)).toBe(false)
       service.listSessions()
       expect(schedule).toHaveBeenCalled()
-      expect(schedule.mock.calls.every(([, delay]) => Number.isFinite(delay) && delay! >= 1_000)).toBe(true)
+      expect(
+        schedule.mock.calls.every(
+          ([, delay]) => Number.isFinite(delay) && delay! >= 1_000
+        )
+      ).toBe(true)
     } finally {
       schedule.mockRestore()
     }
@@ -246,7 +254,9 @@ describe("RemoteAccessService", () => {
     service.consumePairingCredential(service.issuePairingGrant().credential)
     expect(
       (
-        db.prepare("SELECT COUNT(*) AS count FROM remote_access_sessions").get() as {
+        db
+          .prepare("SELECT COUNT(*) AS count FROM remote_access_sessions")
+          .get() as {
           count: number
         }
       ).count
@@ -257,10 +267,59 @@ describe("RemoteAccessService", () => {
 
     expect(
       (
-        db.prepare("SELECT COUNT(*) AS count FROM remote_access_sessions").get() as {
+        db
+          .prepare("SELECT COUNT(*) AS count FROM remote_access_sessions")
+          .get() as {
           count: number
         }
       ).count
     ).toBe(0)
+  })
+
+  it("remembers which app uses a session, writing only when it changes", () => {
+    const { db, service } = serviceFixture()
+    const issued = service.consumePairingCredential(
+      service.issuePairingGrant().credential,
+      { label: "Pixel" }
+    )!
+    expect(service.authenticate(issued.token)?.client).toBeNull()
+
+    const phone = {
+      name: "betterc0de-remote",
+      version: "0.1.0-beta.3",
+      platform: "android",
+    }
+    const clientColumns = () =>
+      db
+        .prepare(
+          "SELECT client_name, client_version, client_platform FROM remote_access_sessions WHERE session_id = ?"
+        )
+        .get(issued.id)
+    service.noteClient(issued.id, phone)
+    expect(clientColumns()).toEqual({
+      client_name: "betterc0de-remote",
+      client_version: "0.1.0-beta.3",
+      client_platform: "android",
+    })
+    expect(service.authenticate(issued.token)?.client).toEqual(phone)
+    expect(service.listSessions()).toEqual([
+      expect.objectContaining({ id: issued.id, client: phone }),
+    ])
+
+    // Every request reports the app; an unchanged report costs no write.
+    db.prepare(
+      "UPDATE remote_access_sessions SET client_version = 'marker' WHERE session_id = ?"
+    ).run(issued.id)
+    service.noteClient(issued.id, phone)
+    expect(clientColumns()).toMatchObject({ client_version: "marker" })
+
+    const updated = { ...phone, version: "0.1.0-beta.4" }
+    service.noteClient(issued.id, updated)
+    expect(service.listSessions()[0]?.client).toEqual(updated)
+
+    // A revoked session keeps what it last reported.
+    service.revokeSession(issued.id)
+    service.noteClient(issued.id, { ...phone, version: "9.9.9" })
+    expect(clientColumns()).toMatchObject({ client_version: "0.1.0-beta.4" })
   })
 })

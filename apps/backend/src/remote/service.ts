@@ -1,4 +1,8 @@
 import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto"
+import {
+  formatRemoteClientHeader,
+  type RemoteClientInfo,
+} from "@betterc0de/schema/remote-protocol"
 import type { Db } from "../persistence/db"
 import { logger } from "../observability/logger"
 
@@ -33,6 +37,9 @@ interface RemoteSessionRow {
   last_seen_at: string
   expires_at: string
   revoked_at: string | null
+  client_name: string | null
+  client_version: string | null
+  client_platform: string | null
 }
 
 export type RemoteAccessLevel = "full" | "read_only"
@@ -52,6 +59,8 @@ export interface RemoteAccessSession {
   createdAt: string
   lastSeenAt: string
   expiresAt: string
+  /** The app that last identified itself on this session (phone app only). */
+  client?: RemoteClientInfo | null
 }
 
 export interface IssuedRemoteSession extends RemoteAccessSession {
@@ -107,6 +116,14 @@ function toSession(row: RemoteSessionRow): RemoteAccessSession {
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
     expiresAt: row.expires_at,
+    client:
+      row.client_name && row.client_version
+        ? {
+            name: row.client_name,
+            version: row.client_version,
+            platform: row.client_platform,
+          }
+        : null,
   }
 }
 
@@ -130,6 +147,8 @@ export class RemoteAccessService {
   private closed = false
   private lastCleanupAtMs = Number.NEGATIVE_INFINITY
   private lastExpirySweepAtMs = Number.NEGATIVE_INFINITY
+  /** Last client identification written per session, so a request costs no write. */
+  private readonly notedClients = new Map<string, string>()
 
   // Every statement is prepared once. `authenticate` runs on every remote
   // HTTP request and WebSocket revalidation tick; re-preparing SQL there was
@@ -142,6 +161,7 @@ export class RemoteAccessService {
   private readonly insertSessionStmt
   private readonly selectSessionByHashStmt
   private readonly touchSessionStmt
+  private readonly noteClientStmt
   private readonly selectSessionLivenessStmt
   private readonly listActiveSessionsStmt
   private readonly revokeSessionStmt
@@ -193,13 +213,19 @@ export class RemoteAccessService {
     )
     this.selectSessionByHashStmt = db.prepare(
       `SELECT session_id, credential_hash, label, access_level, created_at,
-              last_seen_at, expires_at, revoked_at
+              last_seen_at, expires_at, revoked_at,
+              client_name, client_version, client_platform
          FROM remote_access_sessions
         WHERE credential_hash = ?`
     )
     this.touchSessionStmt = db.prepare(
       `UPDATE remote_access_sessions
           SET last_seen_at = ?
+        WHERE session_id = ? AND revoked_at IS NULL`
+    )
+    this.noteClientStmt = db.prepare(
+      `UPDATE remote_access_sessions
+          SET client_name = ?, client_version = ?, client_platform = ?
         WHERE session_id = ? AND revoked_at IS NULL`
     )
     this.selectSessionLivenessStmt = db.prepare(
@@ -209,7 +235,8 @@ export class RemoteAccessService {
     )
     this.listActiveSessionsStmt = db.prepare(
       `SELECT session_id, credential_hash, label, access_level, created_at,
-              last_seen_at, expires_at, revoked_at
+              last_seen_at, expires_at, revoked_at,
+              client_name, client_version, client_platform
          FROM remote_access_sessions
         WHERE revoked_at IS NULL AND expires_at > ?
         ORDER BY last_seen_at DESC, created_at DESC`
@@ -395,6 +422,7 @@ export class RemoteAccessService {
         createdAt: now.toISOString(),
         lastSeenAt: now.toISOString(),
         expiresAt: expiresAt.toISOString(),
+        client: null,
       }
     })
 
@@ -437,6 +465,23 @@ export class RemoteAccessService {
     return toSession(row)
   }
 
+  /**
+   * Records which app (and version) uses a session, so the desktop can show
+   * which paired phone needs an update. Written only when it changes.
+   */
+  noteClient(sessionId: string, client: RemoteClientInfo): void {
+    const noted = formatRemoteClientHeader(client)
+    if (this.notedClients.get(sessionId) === noted) return
+    this.noteClientStmt.run(
+      client.name,
+      client.version,
+      client.platform,
+      sessionId
+    )
+    if (this.notedClients.size >= 1_000) this.notedClients.clear()
+    this.notedClients.set(sessionId, noted)
+  }
+
   isSessionActive(sessionId: string): boolean {
     if (!this.enabled() || !sessionId || sessionId.length > 100) return false
     const now = this.now()
@@ -445,9 +490,9 @@ export class RemoteAccessService {
       | Pick<RemoteSessionRow, "expires_at" | "revoked_at">
       | undefined
     return (
-      row !== undefined
-      && row.revoked_at === null
-      && Date.parse(row.expires_at) > now.getTime()
+      row !== undefined &&
+      row.revoked_at === null &&
+      Date.parse(row.expires_at) > now.getTime()
     )
   }
 
@@ -498,7 +543,9 @@ export class RemoteAccessService {
       clearTimeout(this.expirationTimer)
       this.expirationTimer = null
     }
-    const results = await Promise.allSettled(this.revocationSettlements.values())
+    const results = await Promise.allSettled(
+      this.revocationSettlements.values()
+    )
     this.revocationListeners.clear()
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : []
@@ -551,7 +598,11 @@ export class RemoteAccessService {
       now.getTime() - SESSION_AUDIT_RETENTION_MS
     ).toISOString()
     const cleanup = this.db.transaction(() => {
-      this.purgePairingGrantsStmt.run(pairingCutoff, pairingCutoff, pairingCutoff)
+      this.purgePairingGrantsStmt.run(
+        pairingCutoff,
+        pairingCutoff,
+        pairingCutoff
+      )
       this.purgeSessionsStmt.run(sessionCutoff, sessionCutoff)
     })
     cleanup()

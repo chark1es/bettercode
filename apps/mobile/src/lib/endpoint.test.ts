@@ -3,6 +3,7 @@ import {
   PairingInputError,
   normalizeBaseUrl,
   parsePairingInput,
+  pathWithinRoot,
   relativePathWithinRoot,
   websocketUrl,
 } from "./endpoint"
@@ -55,7 +56,27 @@ describe("mobile endpoint parsing", () => {
     expect(() =>
       relativePathWithinRoot("C:\\work\\repo", "C:\\work\\other\\secret.txt")
     ).toThrow("outside")
-    expect(() => relativePathWithinRoot("/repo", "/repo/../private/key")).toThrow("outside")
-    expect(() => relativePathWithinRoot("C:\\repo", "C:\\repo\\..\\private\\key")).toThrow("outside")
+    expect(() =>
+      relativePathWithinRoot("/repo", "/repo/../private/key")
+    ).toThrow("outside")
+    expect(() =>
+      relativePathWithinRoot("C:\\repo", "C:\\repo\\..\\private\\key")
+    ).toThrow("outside")
+  })
+
+  it("joins a path git lists to the project root with the root's separators", () => {
+    expect(pathWithinRoot("/Users/me/repo/", "src/app.ts")).toBe(
+      "/Users/me/repo/src/app.ts"
+    )
+    expect(pathWithinRoot("C:\\work\\repo", "src/app.ts")).toBe(
+      "C:\\work\\repo\\src\\app.ts"
+    )
+    expect(
+      relativePathWithinRoot(
+        "C:\\work\\repo",
+        pathWithinRoot("C:\\work\\repo", "src/app.ts")
+      )
+    ).toBe("src/app.ts")
+    expect(() => pathWithinRoot("/repo", "../private/key")).toThrow("outside")
   })
 })

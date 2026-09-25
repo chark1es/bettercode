@@ -1,14 +1,44 @@
+import {
+  permissionUpdateSchema,
+  type PermissionUpdate,
+} from "@betterc0de/schema"
+import {
+  threadActivityResponseSchema,
+  threadMetadataUpdateSchema,
+  type ThreadMetadataUpdate,
+} from "@betterc0de/schema/http-contracts"
 import { isRecord } from "@betterc0de/schema/json-read"
-import type { PendingRequest } from "@/types/remote"
+import type { PendingRequest, ThreadActivity } from "@/types/remote"
 
 export interface DecodedRuntimeEvent {
   threadId: string
   type: string
   payload: Record<string, unknown>
-  providerKind: string
+  /** `null` when the event does not say; never guessed, so Stop cannot reach the wrong agent. */
+  providerKind: string | null
   providerInstanceId: string | null
   turnId: string | null
   requestId: string | null
+}
+
+/**
+ * A `thread.activity` frame: an activity the desktop just recorded, such as
+ * an approval answered on the desktop. Unlike runtime events, these are not
+ * replayed after a reconnect.
+ */
+export function decodeActivityFrame(frame: unknown): ThreadActivity | null {
+  if (!isRecord(frame) || frame.channel !== "thread.activity") return null
+  const parsed = threadActivityResponseSchema.safeParse(frame.data)
+  return parsed.success ? parsed.data : null
+}
+
+/** A chat renamed on the desktop or another client (`thread.metadata`). */
+export function decodeThreadMetadataFrame(
+  frame: unknown
+): ThreadMetadataUpdate | null {
+  if (!isRecord(frame) || frame.channel !== "thread.metadata") return null
+  const parsed = threadMetadataUpdateSchema.safeParse(frame.data)
+  return parsed.success ? parsed.data : null
 }
 
 export function isReplayGapFrame(frame: unknown): boolean {
@@ -32,7 +62,7 @@ export function decodeRuntimeFrame(frame: unknown): DecodedRuntimeEvent | null {
       stringValue(payload.provider_kind) ??
       stringValue(data.providerKind) ??
       stringValue(data.provider) ??
-      "openai",
+      null,
     providerInstanceId:
       stringValue(payload.providerInstanceId) ??
       stringValue(payload.provider_instance_id) ??
@@ -72,12 +102,23 @@ export function reasoningDelta(event: DecodedRuntimeEvent): string | null {
 
 /** Tools may first arrive as an ACP snapshot rather than a start event. */
 export function runtimeToolId(event: DecodedRuntimeEvent): string | null {
-  const itemType = stringValue(event.payload.itemType) ?? stringValue(event.payload.item_type) ?? ""
-  const isTool = /^(?:tool[._](?:started|delta|completed|failed)|tool_call(?:_delta)?|tool_result)$/.test(event.type)
-    || (/^item[._](?:started|updated|completed)$/.test(event.type) && /command|tool|file|search|read|write|patch/i.test(itemType))
+  const itemType =
+    stringValue(event.payload.itemType) ??
+    stringValue(event.payload.item_type) ??
+    ""
+  const isTool =
+    /^(?:tool[._](?:started|delta|completed|failed)|tool_call(?:_delta)?|tool_result)$/.test(
+      event.type
+    ) ||
+    (/^item[._](?:started|updated|completed)$/.test(event.type) &&
+      /command|tool|file|search|read|write|patch/i.test(itemType))
   if (!isTool) return null
-  return stringValue(event.payload.toolId) ?? stringValue(event.payload.tool_id)
-    ?? stringValue(event.payload.itemId) ?? stringValue(event.payload.item_id)
+  return (
+    stringValue(event.payload.toolId) ??
+    stringValue(event.payload.tool_id) ??
+    stringValue(event.payload.itemId) ??
+    stringValue(event.payload.item_id)
+  )
 }
 
 export function replacementText(event: DecodedRuntimeEvent): {
@@ -181,7 +222,9 @@ export function pendingRequestFromEvent(
     id: requestId,
     threadId: event.threadId,
     kind: isUserInput ? "user-input" : isPlan ? "plan" : "approval",
-    providerKind: event.providerKind,
+    // Answering needs the provider; an event without one gets an empty kind,
+    // which the desktop refuses, instead of a guessed provider.
+    providerKind: event.providerKind ?? "",
     providerInstanceId: event.providerInstanceId,
     title: isUserInput
       ? "Input required"
@@ -194,8 +237,31 @@ export function pendingRequestFromEvent(
           "Approve action"),
     detail: isPlan ? (planMarkdown ?? detail) : detail,
     input: isPlan ? undefined : (event.payload.input ?? event.payload.args),
+    ...(isApproval
+      ? {
+          toolName:
+            stringValue(event.payload.toolName) ??
+            stringValue(event.payload.tool_name) ??
+            stringValue(event.payload.tool) ??
+            undefined,
+          suggestions: permissionSuggestions(event.payload.suggestions),
+        }
+      : {}),
     questions,
   }
+}
+
+/**
+ * The provider's "Always allow" suggestions that are well-formed. They are
+ * only ever offered after `alwaysAllowRules` checked that each is scoped.
+ */
+function permissionSuggestions(value: unknown): PermissionUpdate[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const valid = value.flatMap((item) => {
+    const parsed = permissionUpdateSchema.safeParse(item)
+    return parsed.success ? [parsed.data] : []
+  })
+  return valid.length > 0 ? valid : undefined
 }
 
 export function resolvedRequestId(event: DecodedRuntimeEvent): string | null {

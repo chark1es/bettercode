@@ -15,24 +15,33 @@ import {
   ChevronRight,
   FolderGit2,
   GitBranch,
+  GitCommitHorizontal,
   Plus,
 } from "lucide-react-native"
 import { ConnectionPill, Screen, StateView, TopBar } from "@/components/layout"
 import { colors, font, radius, spacing, type } from "@/design/theme"
+import { remoteErrorMessage } from "@/lib/remote-errors"
 import { useAppStore } from "@/store/app-store"
-import { useSessionStore } from "@/store/session-store"
+import { useReadOnly, useRemoteApi } from "@/transport/use-transport"
 import type { ProjectSummary } from "@/types/remote"
+import { WorktreeChatSheet } from "@/components/worktree-chat-sheet"
 
 export default function ProjectsScreen() {
   const router = useRouter()
-  const profile = useSessionStore((state) => state.profile)
+  const api = useRemoteApi()
+  const readOnly = useReadOnly()
   const projects = useAppStore((state) => state.projects)
+  const error = useAppStore((state) => state.projectsError)
   const threads = useAppStore((state) => state.threads)
   const loading = useAppStore((state) => state.loadingProjects)
   const refreshProjects = useAppStore((state) => state.refreshProjects)
   const createThread = useAppStore((state) => state.createThread)
+  const createWorktreeChat = useAppStore((state) => state.createWorktreeChat)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [creating, setCreating] = useState<string | null>(null)
+  const [worktreeProject, setWorktreeProject] = useState<ProjectSummary | null>(
+    null
+  )
 
   const threadsByProject = useMemo(() => {
     const map: Record<string, typeof threads> = {}
@@ -44,20 +53,31 @@ export default function ProjectsScreen() {
   }, [threads])
 
   const startChat = async (project: ProjectSummary) => {
-    if (!profile) return
+    if (!api) return
     setCreating(project.path)
     try {
-      const thread = await createThread(profile, project)
+      const thread = await createThread(api, project)
       router.push({ pathname: "/chat/[id]", params: { id: thread.id } })
     } catch (error) {
-      Alert.alert(
-        "Could not create chat",
-        error instanceof Error ? error.message : "Unknown error"
-      )
+      Alert.alert("Could not create chat", remoteErrorMessage(error))
     } finally {
       setCreating(null)
     }
   }
+  const startWorktreeChat = async (baseBranch: string) => {
+    if (!api || !worktreeProject) return
+    try {
+      const thread = await createWorktreeChat(api, worktreeProject, baseBranch)
+      setWorktreeProject(null)
+      router.push({ pathname: "/chat/[id]", params: { id: thread.id } })
+    } catch (error) {
+      Alert.alert(
+        "Could not create the worktree chat",
+        remoteErrorMessage(error)
+      )
+    }
+  }
+  const refresh = () => api && void refreshProjects(api).catch(() => undefined)
 
   return (
     <Screen>
@@ -74,9 +94,7 @@ export default function ProjectsScreen() {
             refreshing={loading}
             tintColor={colors.mint}
             colors={[colors.mint]}
-            onRefresh={() =>
-              profile && void refreshProjects(profile).catch(() => undefined)
-            }
+            onRefresh={refresh}
           />
         }
         renderItem={({ item }) => {
@@ -88,6 +106,7 @@ export default function ProjectsScreen() {
               <Pressable
                 accessibilityRole="button"
                 accessibilityState={{ expanded: open }}
+                testID={`project-${item.name}`}
                 onPress={() => setExpanded(open ? null : key)}
                 style={({ pressed }) => [
                   styles.cardHeader,
@@ -105,9 +124,7 @@ export default function ProjectsScreen() {
                     {item.path}
                   </Text>
                 </View>
-                <Text style={styles.threadCount}>
-                  {projectThreads.length}
-                </Text>
+                <Text style={styles.threadCount}>{projectThreads.length}</Text>
                 {open ? (
                   <ChevronDown size={16} color={colors.textMuted} />
                 ) : (
@@ -153,38 +170,88 @@ export default function ProjectsScreen() {
                       + {projectThreads.length - 5} more threads
                     </Text>
                   ) : null}
-                  <Pressable
-                    accessibilityRole="button"
-                    disabled={creating !== null}
-                    onPress={() => void startChat(item)}
-                    style={({ pressed }) => [
-                      styles.create,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    {creating === item.path ? (
-                      <ActivityIndicator color={colors.primaryForeground} />
-                    ) : (
-                      <Plus size={15} color={colors.primaryForeground} />
-                    )}
-                    <Text style={styles.createText}>New chat</Text>
-                  </Pressable>
+                  {readOnly ? null : (
+                    <View style={styles.actions}>
+                      <Pressable
+                        accessibilityRole="button"
+                        disabled={creating !== null}
+                        onPress={() => void startChat(item)}
+                        style={({ pressed }) => [
+                          styles.create,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        {creating === item.path ? (
+                          <ActivityIndicator color={colors.primaryForeground} />
+                        ) : (
+                          <Plus size={15} color={colors.primaryForeground} />
+                        )}
+                        <Text style={styles.createText}>New chat</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        testID={`worktree-chat-${item.name}`}
+                        disabled={creating !== null}
+                        onPress={() => setWorktreeProject(item)}
+                        style={({ pressed }) => [
+                          styles.createSecondary,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <GitBranch size={14} color={colors.text} />
+                        <Text style={styles.createSecondaryText}>
+                          New worktree chat
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        testID={`source-control-${item.name}`}
+                        onPress={() =>
+                          router.push({
+                            pathname: "/git",
+                            params: { root: item.path, name: item.name },
+                          })
+                        }
+                        style={({ pressed }) => [
+                          styles.createSecondary,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <GitCommitHorizontal size={14} color={colors.text} />
+                        <Text style={styles.createSecondaryText}>
+                          Source control
+                        </Text>
+                      </Pressable>
+                    </View>
+                  )}
                 </View>
               ) : null}
             </View>
           )
         }}
         ListEmptyComponent={
-          <StateView
-            loading={loading}
-            title="No projects"
-            message="Open a project on the desktop; it will appear here automatically."
-            actionLabel="Refresh"
-            onAction={() =>
-              profile && void refreshProjects(profile).catch(() => undefined)
-            }
-          />
+          error ? (
+            <StateView
+              title="Projects unavailable"
+              message={error}
+              actionLabel="Try again"
+              onAction={refresh}
+            />
+          ) : (
+            <StateView
+              loading={loading}
+              title="No projects"
+              message="Open a project on the desktop; it will appear here automatically."
+              actionLabel="Refresh"
+              onAction={refresh}
+            />
+          )
         }
+      />
+      <WorktreeChatSheet
+        project={worktreeProject}
+        onClose={() => setWorktreeProject(null)}
+        onCreate={startWorktreeChat}
       />
     </Screen>
   )
@@ -287,6 +354,23 @@ const styles = StyleSheet.create({
   },
   createText: {
     color: colors.primaryForeground,
+    fontSize: 12,
+    fontFamily: font.semibold,
+  },
+  actions: { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs },
+  createSecondary: {
+    minHeight: 34,
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  createSecondaryText: {
+    color: colors.text,
     fontSize: 12,
     fontFamily: font.semibold,
   },

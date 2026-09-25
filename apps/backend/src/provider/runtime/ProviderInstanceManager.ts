@@ -24,6 +24,7 @@ import {
   type ApprovalRequestId,
 } from "./contracts"
 import { CodexAdapter } from "./codex/CodexAdapter"
+import { codexBinaryPath } from "./codex/CodexBinaryPath"
 import { ClaudeAdapter } from "./claude/ClaudeAdapter"
 import { ClaudeTerminalAdapter } from "./claudeTerminal/ClaudeTerminalAdapter"
 import { CursorAcpAdapter } from "./cursor/CursorAcpAdapter"
@@ -145,7 +146,7 @@ export class ProviderInstanceManager {
 
     if (driver === "codex") {
       const configuredBinaryPath = readConfigString(config.config, "binaryPath")
-      const binaryPath = configuredBinaryPath || "codex"
+      const binaryPath = codexBinaryPath(configuredBinaryPath)
       const effectiveConfig = {
         ...readConfigRecord(config.config),
         binaryPath,
@@ -194,7 +195,8 @@ export class ProviderInstanceManager {
 
     if (driver === "claude") {
       const binaryPath =
-        readConfigString(config.config, "binaryPath") ?? "claude"
+        readConfigString(config.config, "binaryPath") ??
+        (process.env.BETTERC0DE_CLAUDE_CODE_PATH?.trim() || "claude")
       const continuationKey = claudeContinuationKey(
         readConfigString(config.config, "homePath")
       )
@@ -433,9 +435,9 @@ export function deriveProviderInstanceConfigs(
   return Object.values(merged)
     .filter((config) => config.enabled !== false)
     .sort((a, b) => {
-    const rank = defaultRank(a.instanceId) - defaultRank(b.instanceId)
-    return rank !== 0 ? rank : a.instanceId.localeCompare(b.instanceId)
-  })
+      const rank = defaultRank(a.instanceId) - defaultRank(b.instanceId)
+      return rank !== 0 ? rank : a.instanceId.localeCompare(b.instanceId)
+    })
 }
 
 function defaultProviderInstances(
@@ -471,7 +473,7 @@ function defaultProviderInstances(
       enabled: providers.codex?.enabled !== false,
       environment: inheritedProviderEnvironment(["OPENAI_API_KEY"]),
       config: {
-        binaryPath: codexProviderBinaryPath || "codex",
+        binaryPath: codexBinaryPath(codexProviderBinaryPath),
         homePath: process.env.CODEX_HOME ?? "",
         shadowHomePath: "",
         customModels: providers.codex?.custom_models ?? [],
@@ -576,7 +578,8 @@ function defaultProviderInstances(
               binaryPath:
                 readConfigString(betterC0deProvider, "binaryPath") ||
                 "betterc0de",
-              serverUrl: readConfigString(betterC0deProvider, "serverUrl") ?? "",
+              serverUrl:
+                readConfigString(betterC0deProvider, "serverUrl") ?? "",
               serverUsername:
                 readConfigString(betterC0deProvider, "serverUsername") ?? "",
               serverPassword:

@@ -8,6 +8,12 @@ import type { ServerConfig } from "../config"
 import { buildApp } from "../http/router"
 import { openDatabase } from "../persistence/db"
 import { runMigrations } from "../persistence/migrations"
+import {
+  openTerminalPtySession,
+  readTerminalPtySession,
+  shutdownTerminalPtySessionsForOwner,
+} from "../services/terminalPty"
+import type { RemoteRoutesOptions } from "./http"
 import { RemoteAccessService } from "./service"
 import type { TailscaleRemoteAccess, TailscaleRemoteState } from "./tailscale"
 import { stopAllToolOutputArchiveStores } from "../services/tool-output-archive-store"
@@ -25,6 +31,7 @@ function fixture(
     trustLoopbackProxyHeaders?: boolean
     tailscaleServe?: boolean
     tailscale?: TailscaleRemoteAccess
+    remoteTerminals?: RemoteRoutesOptions["remoteTerminals"]
   } = {}
 ) {
   const directory = fs.mkdtempSync(
@@ -78,7 +85,9 @@ function fixture(
     providerRegistry: { all: () => [] },
     threads: { persistUserMessageForTurn: vi.fn() },
   } as unknown as AppState
-  const app = buildApp(config, state)
+  const app = buildApp(config, state, {
+    remoteTerminals: options.remoteTerminals,
+  })
   cleanups.push(async () => {
     await stopAllToolOutputArchiveStores()
     await remoteAccess.close()
@@ -231,6 +240,84 @@ describe("remote access HTTP flow", () => {
     expect(replayResponse.status).toBe(401)
   })
 
+  it("shows a device's running terminals, and only the desktop ends them", async () => {
+    const endedOnDesktop = vi.fn()
+    const { app } = fixture({ remoteTerminals: { endedOnDesktop } })
+    const grantResponse = await app.request("/api/v1/remote/pairing-links", {
+      method: "POST",
+      headers: desktopHeaders(),
+      body: "{}",
+    })
+    const grant = (await grantResponse.json()) as { credential: string }
+    const pairResponse = await app.request("/api/v1/remote/mobile/pair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credential: grant.credential, label: "Pixel" }),
+    })
+    const { sessionToken } = (await pairResponse.json()) as {
+      sessionToken: string
+    }
+    const devices = async () => {
+      const response = await app.request("/api/v1/remote/sessions", {
+        headers: desktopHeaders(),
+      })
+      const body = (await response.json()) as {
+        sessions: Array<{ id: string; terminals: number }>
+      }
+      return body.sessions
+    }
+    const [device] = await devices()
+    expect(device).toMatchObject({ terminals: 0 })
+    const sessionId = device!.id
+
+    // The device's terminal: a program that runs until it is ended.
+    const ownerId = `remote:${sessionId}`
+    cleanups.push(async () => {
+      await shutdownTerminalPtySessionsForOwner(ownerId)
+    })
+    const terminal = openTerminalPtySession({
+      ownerId,
+      cwd: os.tmpdir(),
+      command: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+    })
+    expect(await devices()).toEqual([
+      expect.objectContaining({ id: sessionId, terminals: 1 }),
+    ])
+
+    const fromDevice = await app.request(
+      `/api/v1/remote/sessions/${sessionId}/terminals`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      }
+    )
+    expect(fromDevice.status).toBe(403)
+    expect(endedOnDesktop).not.toHaveBeenCalled()
+    expect(readTerminalPtySession(terminal.sessionId, 0, ownerId)?.status).toBe(
+      "running"
+    )
+
+    const fromDesktop = await app.request(
+      `/api/v1/remote/sessions/${sessionId}/terminals`,
+      { method: "DELETE", headers: desktopHeaders() }
+    )
+    expect(fromDesktop.status).toBe(200)
+    expect(await fromDesktop.json()).toEqual({ ended: 1 })
+    expect(endedOnDesktop).toHaveBeenCalledWith(sessionId)
+    // The shutdown drops a terminal only once it exited (one still running
+    // fails the request instead), so gone means ended.
+    expect(readTerminalPtySession(terminal.sessionId, 0, ownerId)).toBeNull()
+    // Only the terminals went: the device stays paired.
+    expect(await devices()).toEqual([
+      expect.objectContaining({ id: sessionId, terminals: 0 }),
+    ])
+    const stillPaired = await app.request("/api/v1/runtime/health", {
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    })
+    expect(stillPaired.status).toBe(200)
+  })
+
   it("keeps access administration and listener settings owner-only", async () => {
     const { app, settings } = fixture()
     const grantResponse = await app.request("/api/v1/remote/pairing-links", {
@@ -282,7 +369,9 @@ describe("remote access HTTP flow", () => {
     }
     // Loopback is always there; whatever else this machine advertises
     // without the plaintext flag must be a private-network address.
-    expect(grant.links.some((link) => link.url.startsWith("http://127.0.0.1:3773"))).toBe(true)
+    expect(
+      grant.links.some((link) => link.url.startsWith("http://127.0.0.1:3773"))
+    ).toBe(true)
     for (const link of grant.links) {
       const host = new URL(link.url).hostname
       if (host === "127.0.0.1") continue
@@ -342,6 +431,7 @@ describe("remote access HTTP flow", () => {
     expect(publicPeer.status).toBe(426)
     expect(await publicPeer.json()).toEqual({
       error: "secure transport required",
+      code: "secure_transport_required",
     })
     // No socket at all (an in-process caller asking for a LAN host name)
     // is not a private peer either.
@@ -365,7 +455,9 @@ describe("remote access HTTP flow", () => {
     })
     const grant = (await grantResponse.json()) as { credential: string }
     const pairedAt = Date.now()
-    const publicPeer = { incoming: { socket: { remoteAddress: "198.51.100.7" } } }
+    const publicPeer = {
+      incoming: { socket: { remoteAddress: "198.51.100.7" } },
+    }
     const pairResponse = await app.request(
       "http://203.0.113.20:3773/api/v1/remote/pair",
       {
@@ -401,6 +493,7 @@ describe("remote access HTTP flow", () => {
     expect(mutation.status).toBe(403)
     expect(await mutation.json()).toEqual({
       error: "remote session is restricted to read-only monitoring",
+      code: "remote_read_only",
     })
 
     const leakedDesktopCredential = await app.request(
@@ -423,11 +516,16 @@ describe("remote access HTTP flow", () => {
       { incoming: { socket: { remoteAddress: "203.0.113.9" } } }
     )
     expect(response.status).toBe(426)
-    expect(await response.json()).toEqual({ error: "secure transport required" })
+    expect(await response.json()).toEqual({
+      error: "secure transport required",
+      code: "secure_transport_required",
+    })
   })
 
   it("reads the forwarded client from the hop the trusted proxy wrote, not the one the client sent", async () => {
-    const loopbackPeer = { incoming: { socket: { remoteAddress: "127.0.0.1" } } }
+    const loopbackPeer = {
+      incoming: { socket: { remoteAddress: "127.0.0.1" } },
+    }
     const pairUrl = "http://127.0.0.1:3773/api/v1/remote/pair"
     const trusted = fixture({ trustProxyHeaders: true })
     const pair = async (headers: Record<string, string>) => {
@@ -451,7 +549,9 @@ describe("remote access HTTP flow", () => {
     // A public client prepended a LAN address to the chain; the proxy
     // appended the peer it really accepted. The proxy's entry is the
     // rightmost one and wins, so this is still a public plaintext peer.
-    const spoofed = await pair({ "X-Forwarded-For": "192.168.1.40, 203.0.113.9" })
+    const spoofed = await pair({
+      "X-Forwarded-For": "192.168.1.40, 203.0.113.9",
+    })
     expect(spoofed.status).toBe(426)
 
     // `X-Real-IP` is client-controlled even behind a trusted proxy.
@@ -485,7 +585,9 @@ describe("remote access HTTP flow", () => {
   it("classifies a request behind a same-host reverse proxy by the forwarded client", async () => {
     // The proxy terminates TLS on this machine, so every request reaches the
     // backend from 127.0.0.1 over plaintext with a loopback Host header.
-    const loopbackPeer = { incoming: { socket: { remoteAddress: "127.0.0.1" } } }
+    const loopbackPeer = {
+      incoming: { socket: { remoteAddress: "127.0.0.1" } },
+    }
     const pairUrl = "http://127.0.0.1:3773/api/v1/remote/pair"
     const issueGrant = async (app: ReturnType<typeof fixture>["app"]) => {
       const response = await app.request("/api/v1/remote/pairing-links", {
@@ -602,7 +704,10 @@ describe("remote access HTTP flow", () => {
     })
 
     expect(response.status).toBe(413)
-    expect(await response.json()).toEqual({ error: "request body too large" })
+    expect(await response.json()).toEqual({
+      error: "request body too large",
+      code: "request_too_large",
+    })
   })
 
   it("does not accept a cookie from a different loopback origin port", async () => {
@@ -780,7 +885,9 @@ describe("remote access through Tailscale Serve", () => {
       "tailscale",
       "loopback",
     ])
-    expect(status.endpoints.find((endpoint) => endpoint.id === "tailscale")).toMatchObject({
+    expect(
+      status.endpoints.find((endpoint) => endpoint.id === "tailscale")
+    ).toMatchObject({
       httpBaseUrl: "https://desk.tail1234.ts.net",
       isDefault: false,
     })
@@ -791,8 +898,12 @@ describe("remote access through Tailscale Serve", () => {
         body: "{}",
       })
     ).json()) as { links: Array<{ endpointId: string; url: string }> }
-    const httpsLink = grant.links.find((link) => link.endpointId === "tailscale")
-    expect(httpsLink?.url).toMatch(/^https:\/\/desk\.tail1234\.ts\.net\/#token=/)
+    const httpsLink = grant.links.find(
+      (link) => link.endpointId === "tailscale"
+    )
+    expect(httpsLink?.url).toMatch(
+      /^https:\/\/desk\.tail1234\.ts\.net\/#token=/
+    )
 
     // Setting on, but Tailscale reports no mapping: no dead link.
     const inactive = fixture({
@@ -812,7 +923,9 @@ describe("remote access through Tailscale Serve", () => {
     // Setting off: Tailscale is not even consulted.
     const idle = fakeTailscale()
     const off = fixture({ tailscale: idle })
-    await off.app.request("/api/v1/remote/status", { headers: desktopHeaders() })
+    await off.app.request("/api/v1/remote/status", {
+      headers: desktopHeaders(),
+    })
     expect(idle.describe).not.toHaveBeenCalled()
   })
 
@@ -860,7 +973,9 @@ describe("remote access through Tailscale Serve", () => {
     }
     expect(
       (
-        await app.request("/api/v1/remote/tailscale", { headers: remoteHeaders })
+        await app.request("/api/v1/remote/tailscale", {
+          headers: remoteHeaders,
+        })
       ).status
     ).toBe(403)
     expect(
@@ -877,7 +992,9 @@ describe("remote access through Tailscale Serve", () => {
         await app.request("/api/v1/settings", {
           method: "PATCH",
           headers: remoteHeaders,
-          body: JSON.stringify({ patch: { remote_access_tailscale_serve: false } }),
+          body: JSON.stringify({
+            patch: { remote_access_tailscale_serve: false },
+          }),
         })
       ).status
     ).toBe(403)
@@ -961,7 +1078,9 @@ describe("remote access over the tailnet address", () => {
       tailnetPeer
     )
     expect(browserPair.status).toBe(200)
-    expect(browserPair.headers.get("set-cookie") ?? "").not.toMatch(/;\s*Secure/i)
+    expect(browserPair.headers.get("set-cookie") ?? "").not.toMatch(
+      /;\s*Secure/i
+    )
   })
 
   it("refuses the same peer when the packets did not arrive on our tailnet address", async () => {
@@ -976,7 +1095,10 @@ describe("remote access over the tailnet address", () => {
       },
       {
         incoming: {
-          socket: { remoteAddress: "100.70.55.96", localAddress: "192.168.1.20" },
+          socket: {
+            remoteAddress: "100.70.55.96",
+            localAddress: "192.168.1.20",
+          },
         },
       }
     )
@@ -1010,7 +1132,10 @@ describe("remote access over the tailnet address", () => {
       },
       {
         incoming: {
-          socket: { remoteAddress: "192.168.1.40", localAddress: "100.88.45.82" },
+          socket: {
+            remoteAddress: "192.168.1.40",
+            localAddress: "100.88.45.82",
+          },
         },
       }
     )
@@ -1071,15 +1196,24 @@ describe("remote access over the tailnet address", () => {
         headers: desktopHeaders(),
         body: "{}",
       })
-    ).json()) as { links: Array<{ endpointId: string; url: string; isDefault: boolean }> }
-    expect(grant.links[0]).toMatchObject({ endpointId: "tailscale-ip", isDefault: true })
-    expect(grant.links[0]?.url).toMatch(/^http:\/\/100\.88\.45\.82:3773\/#token=/)
+    ).json()) as {
+      links: Array<{ endpointId: string; url: string; isDefault: boolean }>
+    }
+    expect(grant.links[0]).toMatchObject({
+      endpointId: "tailscale-ip",
+      isDefault: true,
+    })
+    expect(grant.links[0]?.url).toMatch(
+      /^http:\/\/100\.88\.45\.82:3773\/#token=/
+    )
 
     // Serve on top: both tailnet links, the IP stays the default.
     const both = withTailnet({ serveEnabled: true, serveActive: true })
     await both.settings.updatePublic({ remote_access_tailscale_serve: true })
     const served = (await (
-      await both.app.request("/api/v1/remote/status", { headers: desktopHeaders() })
+      await both.app.request("/api/v1/remote/status", {
+        headers: desktopHeaders(),
+      })
     ).json()) as { endpoints: Array<{ id: string; isDefault: boolean }> }
     expect(stableEndpointIds(served.endpoints)).toEqual([
       "tailscale-ip",

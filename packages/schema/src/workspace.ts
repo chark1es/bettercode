@@ -143,14 +143,25 @@ export const workspaceContextArtifactSchema = z.object({
   cwd: z.string().min(1).max(MAX_PATH_LEN),
   targetPath: z.string().max(MAX_PATH_LEN).default("."),
   threadId: z.string().trim().min(1).max(256).optional(),
-  pendingMessageCharacters: z.number().int().nonnegative().max(1_000_000).default(0),
+  pendingMessageCharacters: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(1_000_000)
+    .default(0),
   pendingAttachments: z
     .array(
       z.object({
         id: z.string().min(1).max(256),
         name: z.string().min(1).max(1_024),
         mediaType: z.string().max(256).nullable().default(null),
-        sizeBytes: z.number().int().nonnegative().max(MAX_WRITE_BYTES).nullable().default(null),
+        sizeBytes: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(MAX_WRITE_BYTES)
+          .nullable()
+          .default(null),
       })
     )
     .max(64)
@@ -287,6 +298,20 @@ export const workspaceWriteSchema = z.object({
   cwd: z.string().min(1).max(MAX_PATH_LEN),
   relativePath: z.string().min(1).max(MAX_PATH_LEN),
   contents: z.string().max(MAX_WRITE_BYTES),
+  /**
+   * The `sha256` from `/workspace/read`: the write fails with 409
+   * WORKSPACE_PATH_CHANGED unless the file still has exactly those bytes.
+   * `null` requires that the file does not exist yet. Omit it to overwrite
+   * unconditionally.
+   */
+  expectedSha256: z
+    .string()
+    .regex(
+      /^[0-9a-f]{64}$/,
+      "expectedSha256 must be a lowercase SHA-256 hex digest"
+    )
+    .nullable()
+    .optional(),
 })
 export type WorkspaceWriteBody = z.infer<typeof workspaceWriteSchema>
 

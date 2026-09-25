@@ -5,8 +5,11 @@ import { serve } from "@hono/node-server"
 import { buildApp } from "../http/router"
 import { WsHub } from "../ws/server"
 import { createWsRpcHandler } from "../ws/rpc"
+import { RemoteTerminalChannel } from "../ws/terminalChannel"
 import { logger } from "../observability/logger"
+import { describeRemoteProtocol } from "../remote/protocol"
 import { REMOTE_SESSION_COOKIE } from "../remote/service"
+import type { Settings } from "../settings/schema"
 import type { AppState } from "../appState"
 import type {
   BootRoot,
@@ -25,7 +28,7 @@ export function createTransport(
   state: AppState
 ): TransportContext {
   const { config, startupCleanup } = root
-  const { remoteAccess } = settingsCtx
+  const { remoteAccess, settings } = settingsCtx
   // ── HTTP + WS ────────────────────────────────────────────────────────
   // Minted by `createBootRoot`; the narrowing no longer carries across the
   // phase boundary, so assert it the same way `token` below already does.
@@ -52,13 +55,57 @@ export function createTransport(
     subscribeToRemoteSessionRevocations: (listener) =>
       remoteAccess.subscribeToSessionRevocations(listener),
     sessionCookieName: REMOTE_SESSION_COOKIE,
+    describeProtocol: (principal) =>
+      describeRemoteProtocol({
+        accessLevel:
+          principal.kind === "local" ? "full" : principal.accessLevel,
+        terminalAllowed:
+          principal.kind === "local" ||
+          settings.get().remote_access_allow_terminal === true,
+      }),
+    noteRemoteClient: (sessionId, client) =>
+      remoteAccess.noteClient(sessionId, client),
   })
   startupCleanup.push({
     name: "WebSocket hub",
     run: () => hub.close(),
   })
-  hub.setRpcHandler(createWsRpcHandler(state, config))
-  return { hub }
+  // Terminals for paired devices over the WebSocket (ws/terminalChannel.ts).
+  const terminals = new RemoteTerminalChannel({
+    state,
+    terminalGranted: () => settings.get().remote_access_allow_terminal === true,
+  })
+  const stopForgettingRevokedTerminals =
+    remoteAccess.subscribeToSessionRevocations((sessionIds) =>
+      terminals.forgetSessions(sessionIds)
+    )
+  startupCleanup.push({
+    name: "remote terminals",
+    run: () => {
+      stopForgettingRevokedTerminals()
+      terminals.dispose()
+    },
+  })
+  // Paired devices learn about a changed terminal grant without reconnecting;
+  // a grant taken away tells each device why its terminals end (the grant's
+  // teardown in bootstrap/providers.ts ends their processes).
+  let terminalAllowed = settings.get().remote_access_allow_terminal === true
+  const refreshProtocolOnSettingsChange = (next: Settings) => {
+    const allowed = next.remote_access_allow_terminal === true
+    if (allowed === terminalAllowed) return
+    terminalAllowed = allowed
+    if (!allowed) terminals.grantRevoked()
+    hub.refreshProtocol()
+  }
+  settings.on("change", refreshProtocolOnSettingsChange)
+  startupCleanup.push({
+    name: "protocol updates for paired devices",
+    run: () => {
+      settings.off("change", refreshProtocolOnSettingsChange)
+    },
+  })
+  hub.setRpcHandler(createWsRpcHandler(state, config, terminals))
+  return { hub, terminals }
 }
 
 /**
@@ -68,12 +115,14 @@ export function createTransport(
 export function buildHttpApp(
   root: BootRoot,
   state: AppState,
-  hub: WsHub
+  hub: WsHub,
+  terminals: RemoteTerminalChannel
 ): HttpApp {
   const { options, config } = root
   const app = buildApp(config, state, {
     wsClientCount: () => hub.clientCount(),
     webRoot: resolveWebRoot(options.webRoot),
+    remoteTerminals: terminals,
   })
   return app
 }
@@ -94,7 +143,9 @@ export function webRootCandidates(
   ]
 }
 
-export function resolveWebRoot(explicit: string | undefined): string | undefined {
+export function resolveWebRoot(
+  explicit: string | undefined
+): string | undefined {
   const candidates = webRootCandidates(explicit)
   for (const candidate of candidates) {
     if (!candidate) continue

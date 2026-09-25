@@ -9,31 +9,73 @@ import {
   TextInput,
   View,
 } from "react-native"
-import { Redirect, useLocalSearchParams, useRouter } from "expo-router"
+import { useLocalSearchParams, useRouter } from "expo-router"
 import {
   ArrowLeft,
   ArrowUp,
   Eye,
   EyeOff,
+  FilePlus2,
+  FolderPlus,
+  Pencil,
+  Plus,
   RefreshCw,
   Search,
+  Trash2,
   X,
 } from "lucide-react-native"
+import {
+  ContentSearchOptions,
+  ContentSearchResults,
+  DEFAULT_CONTENT_SEARCH,
+  type ContentSearchChoices,
+} from "@/components/content-search"
+import { DropdownRow, DropdownSheet } from "@/components/dropdown-sheet"
 import { Screen, StateView } from "@/components/layout"
 import { IconButton } from "@/components/icon-button"
 import { FileRow } from "@/components/file-row"
-import { colors, font, minTouchTarget, radius, spacing, type } from "@/design/theme"
-import { effectiveThreadRoot, relativePathWithinRoot } from "@/lib/endpoint"
-import { remoteApi } from "@/lib/remote-api"
+import { RenameSheet } from "@/components/rename-sheet"
+import {
+  colors,
+  font,
+  minTouchTarget,
+  radius,
+  spacing,
+  type,
+} from "@/design/theme"
+import {
+  effectiveThreadRoot,
+  pathWithinRoot,
+  relativePathWithinRoot,
+} from "@/lib/endpoint"
+import {
+  childPath,
+  deleteConfirmation,
+  fileActionError,
+  fileNameProblem,
+} from "@/lib/file-actions"
+import { remoteErrorMessage } from "@/lib/remote-errors"
 import { useAppStore } from "@/store/app-store"
-import { useSessionStore } from "@/store/session-store"
+import type { ContentSearchResult } from "@/transport/types"
+import { useReadOnly, useRemoteApi } from "@/transport/use-transport"
 import type { DirectoryEntry } from "@/types/remote"
+
+type Naming =
+  | { kind: "file" }
+  | { kind: "folder" }
+  | { kind: "rename"; entry: DirectoryEntry }
+
+const NAMING_WORDS = {
+  file: { heading: "New file", label: "File name", action: "Create" },
+  folder: { heading: "New folder", label: "Folder name", action: "Create" },
+  rename: { heading: "Rename", label: "Name", action: "Rename" },
+} as const
 
 export default function FilesScreen() {
   const params = useLocalSearchParams<{ id: string | string[] }>()
   const threadId = Array.isArray(params.id) ? params.id[0] : params.id
   const router = useRouter()
-  const profile = useSessionStore((state) => state.profile)
+  const api = useRemoteApi()
   const thread = useAppStore((state) =>
     state.threads.find((item) => item.id === threadId)
   )
@@ -41,38 +83,45 @@ export default function FilesScreen() {
   const [currentPath, setCurrentPath] = useState(root)
   const [parent, setParent] = useState<string | null>(null)
   const [entries, setEntries] = useState<DirectoryEntry[]>([])
+  /** Search results keep the desktop's ranking; folders are sorted here. */
+  const [searching, setSearching] = useState(false)
   const [query, setQuery] = useState("")
   const [showHidden, setShowHidden] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [truncated, setTruncated] = useState(false)
+  const readOnly = useReadOnly()
+  /** File names (the desktop's quick search) or the text inside files. */
+  const [mode, setMode] = useState<"names" | "contents">("names")
+  const [choices, setChoices] = useState<ContentSearchChoices>(
+    DEFAULT_CONTENT_SEARCH
+  )
+  const [found, setFound] = useState<ContentSearchResult | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [menuEntry, setMenuEntry] = useState<DirectoryEntry | null>(null)
+  const [naming, setNaming] = useState<Naming | null>(null)
 
   const loadDirectory = useCallback(
     async (path: string, includeHidden: boolean) => {
-      if (!profile || !root) return
+      if (!api || !root) return
       setLoading(true)
       setError(null)
       try {
         relativePathWithinRoot(root, path)
-        const result = await remoteApi(profile).listDirectory(
-          path,
-          includeHidden
-        )
+        const result = await api.listDirectory(path, includeHidden)
         setCurrentPath(result.path)
         setParent(result.parent)
         setEntries(result.entries)
+        setSearching(false)
+        setFound(null)
         setTruncated(result.truncated)
       } catch (caught) {
-        setError(
-          caught instanceof Error
-            ? caught.message
-            : "Failed to load folder."
-        )
+        setError(remoteErrorMessage(caught))
       } finally {
         setLoading(false)
       }
     },
-    [profile, root]
+    [api, root]
   )
 
   useEffect(() => {
@@ -85,16 +134,17 @@ export default function FilesScreen() {
 
   const sortedEntries = useMemo(
     () =>
-      [...entries].sort(
-        (a, b) =>
-          Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name)
-      ),
-    [entries]
+      searching
+        ? entries
+        : [...entries].sort(
+            (a, b) =>
+              Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name)
+          ),
+    [entries, searching]
   )
 
-  if (!profile) return <Redirect href="/pair" />
-
-  const runSearch = async () => {
+  const runSearch = async (searchMode = mode) => {
+    if (!api) return
     const needle = query.trim()
     if (!needle) {
       await loadDirectory(currentPath, showHidden)
@@ -103,7 +153,20 @@ export default function FilesScreen() {
     setLoading(true)
     setError(null)
     try {
-      const result = await remoteApi(profile).searchFiles(root, needle)
+      if (searchMode === "contents") {
+        const include = choices.include.trim()
+        setFound(
+          await api.searchContent(root, needle, {
+            caseSensitive: choices.caseSensitive,
+            wholeWord: choices.wholeWord,
+            regex: choices.regex,
+            ...(include ? { include } : {}),
+          })
+        )
+        return
+      }
+      setFound(null)
+      const result = await api.searchFiles(root, needle)
       setEntries(
         result.entries.map((entry) => ({
           ...entry,
@@ -112,11 +175,10 @@ export default function FilesScreen() {
           mtime: null,
         }))
       )
+      setSearching(true)
       setTruncated(result.truncated)
     } catch (caught) {
-      setError(
-        caught instanceof Error ? caught.message : "Search failed."
-      )
+      setError(remoteErrorMessage(caught))
     } finally {
       setLoading(false)
     }
@@ -132,10 +194,10 @@ export default function FilesScreen() {
       relativePathWithinRoot(root, entry.path)
     } catch (caught) {
       Alert.alert(
-        "Pfad blockiert",
+        "Outside the project",
         caught instanceof Error
           ? caught.message
-          : "Path is outside the project."
+          : "This path is outside the chat's project."
       )
       return
     }
@@ -148,6 +210,75 @@ export default function FilesScreen() {
       pathname: "/chat/[id]/file",
       params: { id: threadId ?? "", path: entry.path },
     })
+  }
+
+  /** A match opens its file at the line. */
+  const openMatch = (path: string, line: number) =>
+    router.push({
+      pathname: "/chat/[id]/file",
+      params: {
+        id: threadId ?? "",
+        path: pathWithinRoot(root, path),
+        line: String(line),
+      },
+    })
+
+  /** Creates or renames; the sheet stays open when the desktop refuses. */
+  const saveName = async (name: string) => {
+    if (!api || !naming) return
+    const folder = safeRelative(root, currentPath)
+    try {
+      if (naming.kind === "file") {
+        // Never over an existing file: the desktop refuses when it exists.
+        await api.writeFile(root, childPath(folder, name), "", null)
+      } else if (naming.kind === "folder") {
+        await api.createFolder(root, childPath(folder, name))
+      } else {
+        const from = relativePathWithinRoot(root, naming.entry.path)
+        const slash = from.lastIndexOf("/")
+        await api.movePath(
+          root,
+          from,
+          childPath(slash === -1 ? "" : from.slice(0, slash), name)
+        )
+      }
+      setNaming(null)
+      await refreshVisible()
+    } catch (caught) {
+      const problem = fileActionError(
+        caught,
+        naming.kind === "rename" ? "rename" : "create"
+      )
+      Alert.alert(problem.title, problem.message)
+    }
+  }
+
+  /** The desktop Explorer's question, then the file or the whole folder. */
+  const removeEntry = (entry: DirectoryEntry) => {
+    const confirmation = deleteConfirmation(entry)
+    Alert.alert(confirmation.title, confirmation.message, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: confirmation.action,
+        style: "destructive",
+        onPress: () => {
+          void (async () => {
+            if (!api) return
+            try {
+              await api.deletePath(
+                root,
+                relativePathWithinRoot(root, entry.path),
+                entry.isDir
+              )
+            } catch (caught) {
+              const problem = fileActionError(caught, "delete")
+              Alert.alert(problem.title, problem.message)
+            }
+            await refreshVisible()
+          })()
+        },
+      },
+    ])
   }
 
   const goUp = () => {
@@ -170,18 +301,22 @@ export default function FilesScreen() {
           onPress={() => router.back()}
         />
         <View style={styles.headerCopy}>
-          <Text style={styles.eyebrow}>CHAT-DATEIEN</Text>
+          <Text style={styles.eyebrow}>CHAT FILES</Text>
           <Text style={styles.title} numberOfLines={1}>
             {thread?.projectName ?? "Project"}
           </Text>
         </View>
+        {readOnly ? null : (
+          <IconButton
+            icon={Plus}
+            label="New file or folder"
+            testID="files-new"
+            onPress={() => setCreating(true)}
+          />
+        )}
         <IconButton
           icon={showHidden ? EyeOff : Eye}
-          label={
-            showHidden
-              ? "Hide hidden files"
-              : "Show hidden files"
-          }
+          label={showHidden ? "Hide hidden files" : "Show hidden files"}
           onPress={() => {
             const next = !showHidden
             setShowHidden(next)
@@ -191,7 +326,7 @@ export default function FilesScreen() {
         />
         <IconButton
           icon={RefreshCw}
-          label="Aktualisieren"
+          label="Refresh"
           tone="mint"
           onPress={() => void refreshVisible()}
         />
@@ -223,8 +358,13 @@ export default function FilesScreen() {
             if (!value) void loadDirectory(currentPath, showHidden)
           }}
           onSubmitEditing={() => void runSearch()}
+          testID="files-search"
           returnKeyType="search"
-          placeholder="Search files in the chat's project"
+          placeholder={
+            mode === "contents"
+              ? "Search text in the chat's project"
+              : "Search files in the chat's project"
+          }
           placeholderTextColor={colors.textMuted}
           autoCapitalize="none"
           autoCorrect={false}
@@ -244,9 +384,42 @@ export default function FilesScreen() {
           </Pressable>
         ) : null}
       </View>
-      {truncated ? (
+      <View style={styles.modes} accessibilityRole="tablist">
+        {(["names", "contents"] as const).map((value) => (
+          <Pressable
+            key={value}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: mode === value }}
+            testID={`files-mode-${value}`}
+            onPress={() => {
+              setMode(value)
+              setFound(null)
+              if (query.trim()) void runSearch(value)
+            }}
+            style={({ pressed }) => [
+              styles.mode,
+              mode === value && styles.modeOn,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text
+              style={[styles.modeText, mode === value && styles.modeTextOn]}
+            >
+              {value === "names" ? "File names" : "Contents"}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      {mode === "contents" ? (
+        <ContentSearchOptions
+          value={choices}
+          onChange={setChoices}
+          onSubmit={() => void runSearch()}
+        />
+      ) : null}
+      {truncated && !found ? (
         <Text style={styles.truncated}>
-          Ergebnis begrenzt — verfeinere deine Suche.
+          Showing the first results. Refine the search to see others.
         </Text>
       ) : null}
       {error ? (
@@ -256,12 +429,23 @@ export default function FilesScreen() {
           actionLabel="Try again"
           onAction={() => void refreshVisible()}
         />
+      ) : found ? (
+        <ContentSearchResults
+          search={found}
+          loading={loading}
+          onRefresh={() => void refreshVisible()}
+          onOpen={openMatch}
+        />
       ) : (
         <FlatList
           data={sortedEntries}
           keyExtractor={(item) => item.path}
           renderItem={({ item }) => (
-            <FileRow entry={item} onPress={() => openEntry(item)} />
+            <FileRow
+              entry={item}
+              onPress={() => openEntry(item)}
+              onMore={readOnly ? undefined : () => setMenuEntry(item)}
+            />
           )}
           contentContainerStyle={[
             styles.list,
@@ -288,6 +472,68 @@ export default function FilesScreen() {
           }
         />
       )}
+      <DropdownSheet
+        visible={creating}
+        onClose={() => setCreating(false)}
+        title="New"
+      >
+        <DropdownRow
+          icon={<FilePlus2 size={16} color={colors.text} />}
+          label="New file"
+          onPress={() => {
+            setCreating(false)
+            setNaming({ kind: "file" })
+          }}
+        />
+        <DropdownRow
+          icon={<FolderPlus size={16} color={colors.text} />}
+          label="New folder"
+          onPress={() => {
+            setCreating(false)
+            setNaming({ kind: "folder" })
+          }}
+        />
+      </DropdownSheet>
+      <DropdownSheet
+        visible={menuEntry !== null}
+        onClose={() => setMenuEntry(null)}
+        title={menuEntry?.name}
+      >
+        <DropdownRow
+          icon={<Pencil size={16} color={colors.text} />}
+          label="Rename"
+          onPress={() => {
+            const entry = menuEntry
+            setMenuEntry(null)
+            if (entry) setNaming({ kind: "rename", entry })
+          }}
+        />
+        <DropdownRow
+          icon={<Trash2 size={16} color={colors.danger} />}
+          label="Delete"
+          destructive
+          onPress={() => {
+            const entry = menuEntry
+            setMenuEntry(null)
+            if (entry) removeEntry(entry)
+          }}
+        />
+      </DropdownSheet>
+      <RenameSheet
+        visible={naming !== null}
+        title={naming?.kind === "rename" ? naming.entry.name : ""}
+        heading={
+          naming?.kind === "rename"
+            ? `Rename ${naming.entry.isDir ? "folder" : "file"}`
+            : NAMING_WORDS[naming?.kind ?? "file"].heading
+        }
+        label={NAMING_WORDS[naming?.kind ?? "file"].label}
+        actionLabel={NAMING_WORDS[naming?.kind ?? "file"].action}
+        fileName
+        problem={fileNameProblem}
+        onCancel={() => setNaming(null)}
+        onSave={saveName}
+      />
     </Screen>
   )
 }
@@ -301,6 +547,32 @@ function safeRelative(root: string, value: string): string {
 }
 
 const styles = StyleSheet.create({
+  modes: {
+    flexDirection: "row",
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.xs,
+  },
+  mode: {
+    minHeight: minTouchTarget,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modeOn: {
+    backgroundColor: colors.surfaceActive,
+    borderColor: colors.borderStrong,
+  },
+  modeText: {
+    color: colors.textSecondary,
+    fontFamily: font.semibold,
+    fontSize: type.micro,
+  },
+  modeTextOn: { color: colors.text },
+  pressed: { opacity: 0.7 },
   header: {
     minHeight: 68,
     paddingHorizontal: spacing.sm,
@@ -318,7 +590,12 @@ const styles = StyleSheet.create({
     fontFamily: font.bold,
     letterSpacing: 1.1,
   },
-  title: { color: colors.text, fontSize: 17, fontFamily: font.bold, marginTop: 2 },
+  title: {
+    color: colors.text,
+    fontSize: 17,
+    fontFamily: font.bold,
+    marginTop: 2,
+  },
   pathBar: {
     minHeight: 58,
     paddingHorizontal: spacing.md,

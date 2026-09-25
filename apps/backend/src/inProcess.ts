@@ -42,9 +42,8 @@ export type { StartOptions, StartedBackend } from "./bootstrap/context"
  * before the HTTP listener binds — test hook only. The unwind runs these steps
  * reversed, so their order is load-bearing and pinned by `inProcess.test.ts`.
  */
-let startupCleanupObserver:
-  | ((steps: readonly ShutdownStep[]) => void)
-  | null = null
+let startupCleanupObserver: ((steps: readonly ShutdownStep[]) => void) | null =
+  null
 export function __observeStartupCleanupForTests(
   observer: ((steps: readonly ShutdownStep[]) => void) | null
 ): void {
@@ -78,7 +77,7 @@ export async function startNodeBackend(
     const settingsCtx = loadSettingsAndRemote(root, persistence)
     const providersCtx = wireProviders(root, persistence, settingsCtx)
     const { state } = providersCtx
-    const { hub } = createTransport(root, settingsCtx, state)
+    const { hub, terminals } = createTransport(root, settingsCtx, state)
     const recovery = recoverProviderRuntime(
       root,
       persistence,
@@ -93,7 +92,7 @@ export async function startNodeBackend(
       settingsCtx,
       providersCtx
     )
-    const app = buildHttpApp(root, state, hub)
+    const app = buildHttpApp(root, state, hub, terminals)
     const timers = startTimers(root, persistence, settingsCtx, providersCtx)
     startupCleanupObserver?.(root.startupCleanup)
     return await bindAndPublish(root, app, {
@@ -154,11 +153,7 @@ async function bindAndPublish(
     let candidateServerShuttingDown = false
     let candidateRuntimeErrorListener: ((error: Error) => void) | null = null
     try {
-      const server = await bindHttpServer(
-        app.fetch as never,
-        config.host,
-        port
-      )
+      const server = await bindHttpServer(app.fetch as never, config.host, port)
       candidateServer = server
       candidateRuntimeErrorListener = attachRuntimeErrorListener(
         server,
@@ -215,14 +210,12 @@ async function bindAndPublish(
       if (candidateServer) {
         candidateServerShuttingDown = true
         try {
-          await closeHttpServer(candidateServer, 1_000).catch(
-            (closeError) => {
-              logger.warn(
-                { port, err: closeError },
-                "failed to close partially initialized HTTP server"
-              )
-            }
-          )
+          await closeHttpServer(candidateServer, 1_000).catch((closeError) => {
+            logger.warn(
+              { port, err: closeError },
+              "failed to close partially initialized HTTP server"
+            )
+          })
         } finally {
           if (candidateRuntimeErrorListener) {
             candidateServer.off("error", candidateRuntimeErrorListener)
@@ -258,9 +251,7 @@ function startStartupHeartbeat(options: StartOptions): { stop(): void } {
     }
   }
   const startupHeartbeatTimer: NodeJS.Timeout | null =
-    options.onStartupHeartbeat
-      ? setInterval(emitStartupHeartbeat, 5_000)
-      : null
+    options.onStartupHeartbeat ? setInterval(emitStartupHeartbeat, 5_000) : null
   startupHeartbeatTimer?.unref()
   emitStartupHeartbeat()
   return {

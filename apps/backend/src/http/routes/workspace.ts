@@ -13,7 +13,10 @@ import {
   scratchWorkspacePathFor,
 } from "../../services/scratchWorkspace"
 import * as workspace from "../../services/workspace"
-import { openWorkspaceRoot, resolveApprovedWorkspaceRoot } from "../../services/workspace/authorization"
+import {
+  openWorkspaceRoot,
+  resolveApprovedWorkspaceRoot,
+} from "../../services/workspace/authorization"
 import { withCheckpointRecoveryMutation } from "../checkpointRecoveryFence"
 import { parseAndHandle } from "../routeHelpers"
 import {
@@ -49,9 +52,12 @@ export {
 
 export function registerWorkspaceRoutes(api: Hono, state: AppState): void {
   api.post("/workspace/open", (c) =>
-    parseAndHandle(c, workspaceTrustGetSchema,
+    parseAndHandle(
+      c,
+      workspaceTrustGetSchema,
       (body) => openWorkspaceRoot(state, body.workspacePath),
-      { operation: "open workspace" })
+      { operation: "open workspace" }
+    )
   )
   // Both search routes answer with the detailed shape
   // (`{ entries|results, truncated, truncatedReason? }`) rather than a bare
@@ -159,12 +165,20 @@ export function registerWorkspaceRoutes(api: Hono, state: AppState): void {
       async (b) => {
         const cwd = await resolveApprovedWorkspaceRoot(state, b.cwd)
         const servers = await workspace.listProjectMcpServers(cwd)
-        if (requestIdentity(c, state.config, state)?.kind !== "remote") return servers
+        if (requestIdentity(c, state.config, state)?.kind !== "remote")
+          return servers
         // Paired clients need the server names for workspace prompt context.
         // Commands, URLs, arguments and arbitrary environment/header values
         // may contain host credentials, including from global configuration.
         return servers.map(({ id, name, type, enabled }) => ({
-          id, name, type, enabled, command: "", args: [], env: {}, sourcePath: "",
+          id,
+          name,
+          type,
+          enabled,
+          command: "",
+          args: [],
+          env: {},
+          sourcePath: "",
         }))
       },
       { operation: "workspace project MCP servers" }
@@ -380,7 +394,9 @@ export function registerWorkspaceRoutes(api: Hono, state: AppState): void {
           operation: "write a workspace file",
         })
         await withCheckpointRecoveryMutation(state, { workspaces: [cwd] }, () =>
-          workspace.writeFile(cwd, b.relativePath, b.contents)
+          workspace.writeFile(cwd, b.relativePath, b.contents, {
+            expectedContentHash: b.expectedSha256,
+          })
         )
         return ctx.body(null, 204)
       },

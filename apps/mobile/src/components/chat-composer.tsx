@@ -1,8 +1,12 @@
 import { useMemo, useRef, useState } from "react"
 import {
+  ActivityIndicator,
+  Alert,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -10,12 +14,36 @@ import {
 } from "react-native"
 import {
   ArrowUp,
+  Bot,
   Brain,
+  Camera,
   ChevronDown,
+  CircleHelp,
+  ClipboardList,
+  Eye,
+  ImagePlus,
+  ListPlus,
+  MessageCircleQuestion,
+  Pencil,
+  ShieldOff,
+  SlidersHorizontal,
   Square,
+  X,
   Zap,
   ZapOff,
+  type LucideIcon,
 } from "lucide-react-native"
+import {
+  BYPASS_CONFIRM_ACTION,
+  BYPASS_CONFIRM_BODY,
+  BYPASS_CONFIRM_TITLE,
+  CHAT_MODE_OPTIONS,
+  PERMISSION_LEVELS,
+  chatModeLabel,
+  permissionLevelLabel,
+  type KnownChatMode,
+  type PermissionLevel,
+} from "@betterc0de/schema/chat-controls"
 import type { ModelOption } from "@/types/remote"
 import { colors, font, radius, spacing, type } from "@/design/theme"
 import {
@@ -23,20 +51,27 @@ import {
   thinkingLabelFor,
   thinkingOptionsFor,
 } from "@/lib/model-capabilities"
+import type { PhotoSource } from "@/lib/photo-picker"
+import type { PreparedPhoto } from "@/lib/photos"
 import { DropdownRow, DropdownSheet } from "./dropdown-sheet"
 import { ProviderLogo } from "./provider-logo"
 
 /**
  * Composer, ported from the desktop AI-Elements PromptInput: one rounded
- * card with the multiline input on top and a footer of pill controls exactly
- * like the desktop minimal footer — Model, Thinking and Fast Mode dropdowns
- * on the left, circular primary send (ArrowUp) on the right. Thinking levels
- * and the Fast toggle mirror the desktop capability rules per provider/model.
+ * card with the multiline input on top and a footer of pill controls like
+ * the desktop minimal footer — Permissions, Mode, Model, Thinking and Fast
+ * Mode, scrolling sideways on a narrow screen — with the circular send
+ * button (ArrowUp) on the right. While a reply runs, Stop ends it and Queue
+ * sends the message after it, as on the desktop. The permission presets,
+ * their Bypass warning and the modes come from @betterc0de/schema, so both
+ * apps say the same. Photos from the library or the camera sit above the
+ * text until the message goes; a message may be photos alone.
  */
 export function ChatComposer({
   value,
   onChange,
   onSend,
+  onQueue,
   onStop,
   onChooseModel,
   model,
@@ -46,10 +81,20 @@ export function ChatComposer({
   onThinkingModeChange,
   fastMode,
   onFastModeChange,
+  permissionLevel,
+  onPermissionLevelChange,
+  chatMode,
+  onChatModeChange,
+  photos,
+  preparingPhotos,
+  photoProblem,
+  onAddPhotos,
+  onRemovePhoto,
 }: {
   value: string
   onChange: (value: string) => void
   onSend: () => void
+  onQueue: () => void
   onStop: () => void
   onChooseModel: () => void
   model: ModelOption | null
@@ -59,32 +104,112 @@ export function ChatComposer({
   onThinkingModeChange: (mode: string | null) => void
   fastMode: boolean
   onFastModeChange: (fastMode: boolean) => void
+  permissionLevel: PermissionLevel
+  onPermissionLevelChange: (level: PermissionLevel) => void
+  chatMode: KnownChatMode
+  onChatModeChange: (mode: KnownChatMode) => void
+  photos: readonly PreparedPhoto[]
+  /** Photos are being chosen or prepared. */
+  preparingPhotos: boolean
+  /** Why a chosen photo was not added. */
+  photoProblem: string | null
+  onAddPhotos: (source: PhotoSource) => void
+  onRemovePhoto: (id: string) => void
 }) {
   const inputRef = useRef<TextInput>(null)
   const [thinkingOpen, setThinkingOpen] = useState(false)
   const [fastOpen, setFastOpen] = useState(false)
+  const [permissionOpen, setPermissionOpen] = useState(false)
+  const [modeOpen, setModeOpen] = useState(false)
   const goalCommand = /^\/goal(?:\s|$)/i.test(value.trim())
   const showStop = running && !goalCommand
-  const canSend =
-    value.trim().length > 0 && !disabled && (!running || goalCommand) && Boolean(model)
+  const hasContent =
+    (value.trim().length > 0 || photos.length > 0) &&
+    !disabled &&
+    !preparingPhotos &&
+    Boolean(model)
+  const canSend = hasContent && (!running || goalCommand)
+  const canQueue = hasContent && showStop
+  const canAttach = !disabled && !preparingPhotos
   const thinkingOptions = useMemo(() => thinkingOptionsFor(model), [model])
   const thinkingLabel = thinkingLabelFor(thinkingOptions, thinkingMode)
   const showThinking = thinkingOptions.length > 0
   const showFast = supportsFastMode(model)
   const isClaude = (model?.providerKind ?? "").toLowerCase().includes("claude")
+  const PermissionIcon = permissionIcon(permissionLevel)
+  const ModeIcon = modeIcon(chatMode)
+  const bypass = permissionLevel === "bypass"
+
+  const choosePermission = (level: PermissionLevel) => {
+    setPermissionOpen(false)
+    if (level === permissionLevel) return
+    if (level !== "bypass") {
+      onPermissionLevelChange(level)
+      return
+    }
+    Alert.alert(BYPASS_CONFIRM_TITLE, BYPASS_CONFIRM_BODY, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: BYPASS_CONFIRM_ACTION,
+        style: "destructive",
+        onPress: () => onPermissionLevelChange("bypass"),
+      },
+    ])
+  }
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
+    // Padding on Android too: the app is edge to edge, so the window no
+    // longer shrinks for the keyboard, which would cover the composer.
+    <KeyboardAvoidingView behavior="padding">
       <View style={styles.shell}>
         <View style={styles.card}>
+          {photos.length > 0 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.photos}
+              accessibilityLabel="Photos in this message"
+              testID="composer-photos"
+            >
+              {photos.map((photo, index) => (
+                <View key={photo.id} style={styles.photo}>
+                  <Image
+                    source={{ uri: `data:image/jpeg;base64,${photo.base64}` }}
+                    style={styles.photoImage}
+                    accessibilityLabel={`Photo ${index + 1}`}
+                  />
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove photo ${index + 1}`}
+                    testID={`composer-photo-remove-${index}`}
+                    hitSlop={10}
+                    onPress={() => onRemovePhoto(photo.id)}
+                    style={({ pressed }) => [
+                      styles.photoRemove,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <X size={12} color={colors.text} />
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
+          ) : null}
+          {photoProblem ? (
+            <Text style={styles.photoProblem} testID="composer-photo-problem">
+              {photoProblem}
+            </Text>
+          ) : null}
           <TextInput
             ref={inputRef}
             accessibilityLabel="Message"
+            testID="chat-input"
             value={value}
             onChangeText={onChange}
-            placeholder="Message the desktop agent…"
+            placeholder={
+              running ? "Queue a message…" : "Message the desktop agent…"
+            }
             placeholderTextColor={colors.textMuted}
             style={styles.input}
             multiline
@@ -93,7 +218,94 @@ export function ChatComposer({
             textAlignVertical="top"
           />
           <View style={styles.footer}>
-            <View style={styles.pills}>
+            {preparingPhotos ? (
+              <View
+                style={styles.attach}
+                accessibilityLabel="Preparing photos"
+                testID="composer-photos-preparing"
+              >
+                <ActivityIndicator size="small" color={colors.textSecondary} />
+              </View>
+            ) : (
+              <>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Attach photos"
+                  testID="composer-attach"
+                  accessibilityState={{ disabled: !canAttach }}
+                  disabled={!canAttach}
+                  onPress={() => onAddPhotos("library")}
+                  style={({ pressed }) => [
+                    styles.attach,
+                    pressed && styles.pressed,
+                    !canAttach && styles.disabled,
+                  ]}
+                >
+                  <ImagePlus size={17} color={colors.textSecondary} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Take a photo"
+                  testID="composer-camera"
+                  accessibilityState={{ disabled: !canAttach }}
+                  disabled={!canAttach}
+                  onPress={() => onAddPhotos("camera")}
+                  style={({ pressed }) => [
+                    styles.attach,
+                    pressed && styles.pressed,
+                    !canAttach && styles.disabled,
+                  ]}
+                >
+                  <Camera size={17} color={colors.textSecondary} />
+                </Pressable>
+              </>
+            )}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              style={styles.pillsScroll}
+              contentContainerStyle={styles.pills}
+            >
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Permissions: ${permissionLevelLabel(permissionLevel)}`}
+                testID="composer-permissions"
+                onPress={() => setPermissionOpen(true)}
+                style={({ pressed }) => [
+                  styles.pill,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <PermissionIcon
+                  size={13}
+                  color={bypass ? colors.danger : colors.textSecondary}
+                />
+                <Text
+                  style={[styles.pillText, bypass && styles.pillTextDanger]}
+                  numberOfLines={1}
+                >
+                  {permissionLevelLabel(permissionLevel)}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Mode: ${chatModeLabel(chatMode)}`}
+                testID="composer-mode"
+                onPress={() => setModeOpen(true)}
+                style={({ pressed }) => [
+                  styles.pill,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <ModeIcon size={13} color={modeColor(chatMode)} />
+                <Text
+                  style={[styles.pillText, { color: modeColor(chatMode) }]}
+                  numberOfLines={1}
+                >
+                  {chatModeLabel(chatMode)}
+                </Text>
+              </Pressable>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Choose provider and model"
@@ -123,9 +335,7 @@ export function ChatComposer({
                 >
                   <Brain
                     size={13}
-                    color={
-                      thinkingMode ? colors.text : colors.textSecondary
-                    }
+                    color={thinkingMode ? colors.text : colors.textSecondary}
                   />
                   <Text style={styles.pillText} numberOfLines={1}>
                     {thinkingLabel}
@@ -150,42 +360,119 @@ export function ChatComposer({
                     fill={fastMode ? colors.warning : "none"}
                   />
                   <Text
-                    style={[
-                      styles.pillText,
-                      fastMode && styles.pillTextFast,
-                    ]}
+                    style={[styles.pillText, fastMode && styles.pillTextFast]}
                     numberOfLines={1}
                   >
                     {fastMode ? "Fast" : "Off"}
                   </Text>
                 </Pressable>
               ) : null}
-            </View>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={showStop ? "Stop response" : "Send message"}
-              accessibilityState={{ disabled: showStop ? false : !canSend }}
-              disabled={showStop ? false : !canSend}
-              onPress={showStop ? onStop : onSend}
-              style={({ pressed }) => [
-                styles.send,
-                pressed && styles.pressed,
-                !showStop && !canSend && styles.disabled,
-              ]}
-            >
-              {showStop ? (
-                <Square
-                  size={14}
-                  fill={colors.primaryForeground}
-                  color={colors.primaryForeground}
-                />
-              ) : (
+            </ScrollView>
+            {showStop ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Stop response"
+                testID="chat-stop"
+                onPress={onStop}
+                style={({ pressed }) => [
+                  styles.round,
+                  styles.stop,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Square size={13} fill={colors.text} color={colors.text} />
+              </Pressable>
+            ) : null}
+            {showStop ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Queue message"
+                accessibilityHint="Sends it when the current reply is finished"
+                testID="chat-queue"
+                accessibilityState={{ disabled: !canQueue }}
+                disabled={!canQueue}
+                onPress={onQueue}
+                style={({ pressed }) => [
+                  styles.round,
+                  styles.send,
+                  pressed && styles.pressed,
+                  !canQueue && styles.disabled,
+                ]}
+              >
+                <ListPlus size={17} color={colors.primaryForeground} />
+              </Pressable>
+            ) : (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Send message"
+                testID="chat-send"
+                accessibilityState={{ disabled: !canSend }}
+                disabled={!canSend}
+                onPress={onSend}
+                style={({ pressed }) => [
+                  styles.round,
+                  styles.send,
+                  pressed && styles.pressed,
+                  !canSend && styles.disabled,
+                ]}
+              >
                 <ArrowUp size={18} color={colors.primaryForeground} />
-              )}
-            </Pressable>
+              </Pressable>
+            )}
           </View>
         </View>
       </View>
+
+      {/* Permissions — the desktop's presets, one row each with its line. */}
+      <DropdownSheet
+        visible={permissionOpen}
+        onClose={() => setPermissionOpen(false)}
+        title="Permissions"
+      >
+        {PERMISSION_LEVELS.map((option) => {
+          const Icon = permissionIcon(option.id)
+          return (
+            <DropdownRow
+              key={option.id}
+              icon={
+                <Icon
+                  size={15}
+                  color={option.danger ? colors.danger : colors.textSecondary}
+                />
+              }
+              label={option.label}
+              sublabel={option.desc}
+              destructive={option.danger}
+              active={option.id === permissionLevel}
+              onPress={() => choosePermission(option.id)}
+            />
+          )
+        })}
+      </DropdownSheet>
+
+      {/* Mode — Shift+Tab and /plan, /ask on the desktop. */}
+      <DropdownSheet
+        visible={modeOpen}
+        onClose={() => setModeOpen(false)}
+        title="Mode"
+      >
+        {CHAT_MODE_OPTIONS.map((option) => {
+          const Icon = modeIcon(option.id)
+          return (
+            <DropdownRow
+              key={option.id}
+              icon={<Icon size={15} color={modeColor(option.id)} />}
+              label={option.label}
+              sublabel={option.desc}
+              active={option.id === chatMode}
+              onPress={() => {
+                setModeOpen(false)
+                if (option.id !== chatMode) onChatModeChange(option.id)
+              }}
+            />
+          )
+        })}
+      </DropdownSheet>
 
       {/* Thinking dropdown — desktop's Brain menu, one row per effort level. */}
       <DropdownSheet
@@ -200,9 +487,7 @@ export function ChatComposer({
               <Brain
                 size={15}
                 color={
-                  option.mode === null
-                    ? colors.textMuted
-                    : colors.textSecondary
+                  option.mode === null ? colors.textMuted : colors.textSecondary
                 }
               />
             }
@@ -255,8 +540,40 @@ export function ChatComposer({
   )
 }
 
+/** The desktop's icons: one shape per idea, the active preset's on the pill. */
+function permissionIcon(level: PermissionLevel): LucideIcon {
+  switch (level) {
+    case "ask-on-edit":
+      return CircleHelp
+    case "allow-edits":
+      return Pencil
+    case "read-only":
+      return Eye
+    case "bypass":
+      return ShieldOff
+    default:
+      return SlidersHorizontal
+  }
+}
+
+function modeIcon(mode: KnownChatMode): LucideIcon {
+  if (mode === "plan") return ClipboardList
+  if (mode === "ask") return MessageCircleQuestion
+  return Bot
+}
+
+/** Plan in sky and Ask in red, as the desktop marks a mode that is not Agent. */
+function modeColor(mode: KnownChatMode): string {
+  if (mode === "plan") return colors.info
+  if (mode === "ask") return colors.danger
+  return colors.textSecondary
+}
+
 function normalize(value: string | null): string {
-  return (value ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "")
+  return (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "")
 }
 
 const styles = StyleSheet.create({
@@ -290,18 +607,52 @@ const styles = StyleSheet.create({
   footer: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
     gap: spacing.xs,
   },
+  photos: {
+    flexDirection: "row",
+    gap: spacing.xs,
+    paddingTop: spacing.xs,
+    paddingHorizontal: spacing.xxs,
+  },
+  photo: { width: 56, height: 56 },
+  photoImage: {
+    width: 56,
+    height: 56,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceActive,
+  },
+  photoRemove: {
+    position: "absolute",
+    top: 2,
+    right: 2,
+    width: 20,
+    height: 20,
+    borderRadius: radius.pill,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.overlay,
+  },
+  photoProblem: {
+    paddingHorizontal: spacing.xxs,
+    paddingTop: spacing.xxs,
+    color: colors.warning,
+    fontFamily: font.regular,
+    fontSize: 12,
+  },
+  attach: {
+    width: 30,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pillsScroll: { flex: 1, minWidth: 0 },
   pills: {
-    flex: 1,
-    minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
   },
   pill: {
-    flexShrink: 1,
     minHeight: 30,
     paddingHorizontal: spacing.xs,
     borderRadius: radius.pill,
@@ -310,19 +661,24 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   pillText: {
-    flexShrink: 1,
     color: colors.textSecondary,
     fontFamily: font.medium,
     fontSize: 11,
   },
   pillTextFast: { color: colors.warning },
-  send: {
+  pillTextDanger: { color: colors.danger },
+  round: {
     width: 34,
     height: 34,
     borderRadius: radius.pill,
-    backgroundColor: colors.primary,
     alignItems: "center",
     justifyContent: "center",
+  },
+  send: { backgroundColor: colors.primary },
+  stop: {
+    backgroundColor: colors.surfaceActive,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
   },
   disabled: { opacity: 0.35 },
   pressed: { opacity: 0.72, transform: [{ scale: 0.97 }] },

@@ -7,7 +7,7 @@ export class PairingInputError extends Error {}
 
 export function normalizeBaseUrl(value: string): string {
   let raw = value.trim()
-  if (!raw) throw new PairingInputError("Desktop-Adresse fehlt.")
+  if (!raw) throw new PairingInputError("The desktop address is missing.")
   if (!/^[a-z][a-z\d+.-]*:\/\//i.test(raw)) raw = `http://${raw}`
 
   let url: URL
@@ -17,9 +17,7 @@ export function normalizeBaseUrl(value: string): string {
     throw new PairingInputError("Desktop address is invalid.")
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new PairingInputError(
-      "Only HTTP or HTTPS addresses are supported."
-    )
+    throw new PairingInputError("Only HTTP or HTTPS addresses are supported.")
   }
   if (url.username || url.password) {
     throw new PairingInputError(
@@ -67,9 +65,7 @@ export function parsePairingInput(
   }
 
   if (!/^[a-z][a-z\d+.-]*:\/\//i.test(candidate)) {
-    throw new PairingInputError(
-      "A bare code also needs the desktop address."
-    )
+    throw new PairingInputError("A bare code also needs the desktop address.")
   }
 
   let url: URL
@@ -113,7 +109,11 @@ export function relativePathWithinRoot(
 ): string {
   const normalizedRoot = normalizeFsPath(root).replace(/\/$/, "")
   const normalizedPath = normalizeFsPath(absolutePath)
-  if ([normalizedRoot, normalizedPath].some(value => value.split("/").includes(".."))) {
+  if (
+    [normalizedRoot, normalizedPath].some((value) =>
+      value.split("/").includes("..")
+    )
+  ) {
     throw new Error("File is outside the chat's project.")
   }
   const caseInsensitive = /^[a-z]:/i.test(normalizedRoot)
@@ -128,6 +128,20 @@ export function relativePathWithinRoot(
     throw new Error("File is outside the chat's project.")
   }
   return normalizedPath.slice(normalizedRoot.length + 1)
+}
+
+/**
+ * A file inside `root` from its path relative to the root (as git lists
+ * it), with the root's own separators, as the desktop joins them.
+ */
+export function pathWithinRoot(root: string, relativePath: string): string {
+  const base = root.trim().replace(/[\\/]+$/, "")
+  const separator = base.includes("\\") ? "\\" : "/"
+  const parts = relativePath.replace(/\\/g, "/").split("/").filter(Boolean)
+  if (parts.includes("..")) {
+    throw new Error("File is outside the chat's project.")
+  }
+  return parts.length > 0 ? `${base}${separator}${parts.join(separator)}` : base
 }
 
 export function isSecureEndpoint(baseUrl: string): boolean {

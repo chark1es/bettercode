@@ -8,6 +8,8 @@ import {
   prepareNativePtyCommand,
   probeNativePtySupport,
   runNativePtyWindowsTaskkill,
+  windowsTreeEndedMeanwhile,
+  windowsTreeTermination,
 } from "./NativePty"
 
 describe("native PTY command preparation", () => {
@@ -18,7 +20,9 @@ describe("native PTY command preparation", () => {
   })
 
   it("resolves PATH and shebangs without synchronous filesystem calls", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "betterc0de-pty-command-"))
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "betterc0de-pty-command-")
+    )
     const executable = path.join(root, "claude-async-test")
     fs.writeFileSync(
       executable,
@@ -40,11 +44,9 @@ describe("native PTY command preparation", () => {
 
     try {
       await expect(
-        prepareNativePtyCommand(
-          "claude-async-test",
-          ["--version"],
-          { PATH: root }
-        )
+        prepareNativePtyCommand("claude-async-test", ["--version"], {
+          PATH: root,
+        })
       ).resolves.toEqual({
         command: "/usr/bin/env",
         args: ["node", "--no-warnings", executable, "--version"],
@@ -119,20 +121,20 @@ describe("native PTY process-tree termination", () => {
   it("terminates descendants that remain after the PTY root exits", async () => {
     vi.useFakeTimers()
     let alive = true
-    const kill = vi.spyOn(process, "kill").mockImplementation(
-      ((pid: number, signal?: NodeJS.Signals | number) => {
-        expect(pid).toBe(-5353)
-        if (signal === 0) {
-          if (alive) return true
-          throw Object.assign(new Error("gone"), { code: "ESRCH" })
-        }
-        if (signal === "SIGKILL") alive = false
-        return true
-      }) as typeof process.kill
-    )
+    const kill = vi.spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      signal?: NodeJS.Signals | number
+    ) => {
+      expect(pid).toBe(-5353)
+      if (signal === 0) {
+        if (alive) return true
+        throw Object.assign(new Error("gone"), { code: "ESRCH" })
+      }
+      if (signal === "SIGKILL") alive = false
+      return true
+    }) as typeof process.kill)
     try {
-      const termination =
-        ensureNativePtyPosixProcessGroupTerminated(5353)
+      const termination = ensureNativePtyPosixProcessGroupTerminated(5353)
       await vi.advanceTimersByTimeAsync(300)
       await expect(termination).resolves.toBeUndefined()
       expect(kill).toHaveBeenCalledWith(-5353, "SIGTERM")
@@ -145,15 +147,14 @@ describe("native PTY process-tree termination", () => {
 
   it("reports a PTY process group that survives SIGKILL", async () => {
     vi.useFakeTimers()
-    const kill = vi.spyOn(process, "kill").mockImplementation(
-      ((pid: number) => {
-        expect(pid).toBe(-5454)
-        return true
-      }) as typeof process.kill
-    )
+    const kill = vi.spyOn(process, "kill").mockImplementation(((
+      pid: number
+    ) => {
+      expect(pid).toBe(-5454)
+      return true
+    }) as typeof process.kill)
     try {
-      const termination =
-        ensureNativePtyPosixProcessGroupTerminated(5454)
+      const termination = ensureNativePtyPosixProcessGroupTerminated(5454)
       const expectation = expect(termination).rejects.toMatchObject({
         code: "NATIVE_PTY_GROUP_SURVIVED_ROOT_EXIT",
         pid: 5454,
@@ -164,5 +165,48 @@ describe("native PTY process-tree termination", () => {
       kill.mockRestore()
       vi.useRealTimers()
     }
+  })
+})
+
+describe("overlapping terminations of a Windows PTY tree", () => {
+  it("taskkill the tree until a request reached it, then only escalate while its root runs", () => {
+    const next = (
+      signal: NodeJS.Signals,
+      rootExited: boolean,
+      treeReached: boolean
+    ) => windowsTreeTermination({ signal, rootExited, treeReached })
+
+    // Nothing reached the tree yet: taskkill it while the root runs.
+    expect(next("SIGTERM", false, false)).toBe("run")
+    expect(next("SIGKILL", false, false)).toBe("run")
+    // The root exited first: its descendants cannot be checked.
+    expect(next("SIGTERM", true, false)).toBe("unaddressable")
+    expect(next("SIGKILL", true, false)).toBe("unaddressable")
+    // Reached: a graceful request again adds nothing; the escalation runs
+    // while the root does; after the root exited nothing is addressed
+    // (its PID may belong to another process by then).
+    expect(next("SIGTERM", false, true)).toBe("skip")
+    expect(next("SIGKILL", false, true)).toBe("run")
+    expect(next("SIGTERM", true, true)).toBe("skip")
+    expect(next("SIGKILL", true, true)).toBe("skip")
+  })
+
+  it("take a tree taskkill no longer finds as ended only after a request reached it", () => {
+    const notFound = Object.assign(new Error("not found"), {
+      code: "NATIVE_PTY_TASKKILL_FAILED",
+      exitCode: 128,
+    })
+    const refused = Object.assign(new Error("access denied"), {
+      code: "NATIVE_PTY_TASKKILL_FAILED",
+      exitCode: 1,
+    })
+    const timedOut = Object.assign(new Error("timed out"), {
+      code: "NATIVE_PTY_TASKKILL_TIMEOUT",
+    })
+    expect(windowsTreeEndedMeanwhile(notFound, true)).toBe(true)
+    expect(windowsTreeEndedMeanwhile(notFound, false)).toBe(false)
+    expect(windowsTreeEndedMeanwhile(refused, true)).toBe(false)
+    expect(windowsTreeEndedMeanwhile(timedOut, true)).toBe(false)
+    expect(windowsTreeEndedMeanwhile(null, true)).toBe(false)
   })
 })

@@ -1788,10 +1788,22 @@ export const MIGRATIONS: Migration[] = [
     // SQL NULL means no goal metadata observed; JSON null is an authoritative clear.
     sql: `ALTER TABLE projection_threads ADD COLUMN provider_goal_json TEXT;`,
   },
+  {
+    // The phone app names itself and its version on every request, so the
+    // desktop's device list can show which paired phone needs an update.
+    version: 53,
+    name: "remote_session_client_info",
+    sql: `
+      ALTER TABLE remote_access_sessions ADD COLUMN client_name TEXT;
+      ALTER TABLE remote_access_sessions ADD COLUMN client_version TEXT;
+      ALTER TABLE remote_access_sessions ADD COLUMN client_platform TEXT;
+    `,
+  },
 ]
 
 /** Any statement that adds or removes an index, `CREATE UNIQUE INDEX` included. */
-export const INDEX_SHAPE_SQL = /\b(?:CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX)\b/i
+export const INDEX_SHAPE_SQL =
+  /\b(?:CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX)\b/i
 
 /**
  * Rows ANALYZE samples per index after an index migration. A full ANALYZE
@@ -1822,10 +1834,15 @@ export function runMigrations(
       }>
     ).map((r) => r.version)
   )
-  const latestSupported = migrations.reduce((latest, migration) => Math.max(latest, migration.version), 0)
+  const latestSupported = migrations.reduce(
+    (latest, migration) => Math.max(latest, migration.version),
+    0
+  )
   if ([...applied].some((version) => version > latestSupported)) {
     throw Object.assign(
-      new Error("Cannot open a newer database schema with this version of BetterC0de. Use the version that upgraded this profile or a newer release."),
+      new Error(
+        "Cannot open a newer database schema with this version of BetterC0de. Use the version that upgraded this profile or a newer release."
+      ),
       { code: "DATABASE_SCHEMA_TOO_NEW" }
     )
   }
