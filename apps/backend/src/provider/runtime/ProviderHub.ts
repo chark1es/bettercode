@@ -80,6 +80,7 @@ import {
   runWithAgentPermissionRuntimeContext,
 } from "../agent-permission-runtime"
 import { HubApprovalRequests } from "./HubApprovalRequests"
+import * as SessionBudget from "./ProviderSessionOperationBudget"
 
 export interface ProviderRuntimeInstance {
   readonly instanceId: string
@@ -3476,36 +3477,38 @@ export class ProviderHub {
 
   private raceInterruptBudget<T>(
     operation: () => Promise<T>,
-    label: string
+    label: string,
+    timeoutMs = this.interruptTimeoutMs
   ): Promise<T> {
     return promiseWithDeadline(
       operation,
-      this.interruptTimeoutMs,
-      `Provider ${label} did not complete within ${this.interruptTimeoutMs}ms`
+      timeoutMs,
+      `Provider ${label} did not complete within ${timeoutMs}ms`
     )
   }
 
-  /**
-   * Bounds one adapter call. On expiry the backend is quarantined and a
-   * stop is attempted without holding the session-admission mutex.
-   */
+  /** Bounds one adapter call and quarantines it when its deadline expires. */
   private async runSessionOperation<T>(
     instance: ProviderRuntimeInstance,
     label: string,
     operation: () => Promise<T>
   ): Promise<T> {
     this.throwIfAdapterQuarantined(instance)
+    const { interruptTimeoutMs } = this
+    const timeoutMs = SessionBudget.get(instance, label, interruptTimeoutMs)
     try {
-      return await this.raceInterruptBudget(operation, label)
+      return await this.raceInterruptBudget(operation, label, timeoutMs)
     } catch (error) {
       if (!(error instanceof ProviderOperationDeadlineError)) throw error
+      SessionBudget.logDeadline(instance, label, timeoutMs)
       const failure = this.quarantineProviderBackend(
         instance,
-        `Provider ${label} did not complete within ${this.interruptTimeoutMs}ms.`
+        `Provider ${label} did not complete within ${timeoutMs}ms.`
       )
       void this.raceInterruptBudget(
         () => instance.adapter.stopAll(),
-        "stopAll"
+        "stopAll",
+        SessionBudget.get(instance, "stopSession", interruptTimeoutMs)
       ).catch(() => {})
       throw failure
     }
