@@ -54,6 +54,13 @@ agents side by side on the same repository.
 - **Remote access** — pair a phone or a second machine with the running desktop
   app over your own network. Nothing is proxied through a cloud service.
 
+In Agent mode, open **Browser** from the right workspace panel's view picker or
+the **Browser preview** row on its Overview page. It uses the focused chat's
+project or worktree, and selected page elements and visual changes go to that
+chat. The narrow panel places the address bar above the selection and inspector
+controls. The inspector fills the panel; closing it returns to the live page.
+Switching workspace views keeps the open page and its navigation state.
+
 Editor and Canvas sidebars have direct Files, Search, Git, Diff and Code Map
 tabs, with outline and references in the view menu. Entering the editor without
 a project reopens an available workspace, preferring the last one used there.
@@ -176,25 +183,38 @@ Artifacts land in `release/`.
 Install any of these and sign in once in a terminal; BetterC0de finds them on
 its own and shows their status under **Settings → Providers**:
 
-| CLI | Install | Sign in |
-| --- | --- | --- |
-| Claude Code | `npm i -g @anthropic-ai/claude-code` | `claude` |
-| OpenAI Codex | `npm i -g @openai/codex` | `codex login` |
-| Cursor Agent | `curl https://cursor.com/install -fsS \| bash` | `cursor-agent login` |
-| Grok | `npm i -g @xai-official/grok` | `grok login` |
+| CLI          | Install                                        | Sign in              |
+| ------------ | ---------------------------------------------- | -------------------- |
+| Claude Code  | `npm i -g @anthropic-ai/claude-code`           | `claude`             |
+| OpenAI Codex | `npm i -g @openai/codex`                       | `codex login`        |
+| Cursor Agent | Windows: `irm 'https://cursor.com/install?win32=true' \| iex`; macOS/Linux/WSL: `curl https://cursor.com/install -fsS \| bash` | `agent login` |
+| Grok         | `npm i -g @xai-official/grok`                  | `grok login`         |
 
 The initial model selection uses **Claude CLI**, then **Codex**, **Cursor**, and
 **Grok CLI**, depending on availability. Other configured providers follow.
-An explicit usable model choice and existing conversation bindings are preserved.
-The retired Claude API entry is excluded from the model picker; old selections
-fall back to a CLI provider. Desktop and mobile use the same priority.
+An explicit model choice and existing conversation bindings are preserved.
+**Claude API** appears separately and becomes usable when an Anthropic API
+account is configured.
+Desktop and mobile use the same default provider priority.
 
-API-key providers (OpenAI, OpenRouter, LM Studio, and others) are
-configured in the same place.
+API-key providers (Claude API, OpenAI, xAI, OpenRouter, LM Studio, and others)
+are configured in the same place. Claude API, OpenAI, and xAI show models
+available to the configured account. Claude CLI reads its SDK initialization
+list, Codex uses `model/list`, Cursor uses its signed-in ACP session, and Grok
+uses ACP and its CLI cache. Catalogs
+refresh every 15 minutes. **Settings → Model Visibility → Refresh API models**
+starts a fresh API lookup, and provider-instance refresh updates a CLI. The last
+successful account-specific list is saved without credentials. If a first
+refresh fails, only explicitly added custom models are offered. A model
+withdrawn from an account remains named in an existing chat; choose another
+model before sending again.
 
 If a CLI is installed somewhere unusual, set its full path in
 **Settings → Providers**; the app never guesses at a bare command name that
 could belong to a different vendor.
+On native Windows, Cursor Agent is also found in `%LOCALAPPDATA%\cursor-agent`
+without adding it to `PATH`. BetterC0de prefers the `cursor-agent` alias there;
+a bare `agent` may belong to another CLI.
 
 Codex can use a separate authentication directory while sharing its session
 history and tools. The shared and authentication directories must not overlap,
@@ -554,9 +574,8 @@ the expensive CLI-boot happens only once. You'll see a new provider entry
 **Codex (CLI)** in the provider picker when it's available.
 
 Models and reasoning options come from the CLI's live catalog. A saved model
-selection is retained while that catalog loads. Astra stays first in the
-Codex model dropdown, including in the fallback catalog during a metadata outage.
-Failed refreshes preserve the last successful catalog and its reasoning options.
+selection is retained while that catalog loads. Failed refreshes preserve the
+last successful account-specific catalog and its reasoning options.
 Google and GLM are no longer offered as built-in provider groups.
 Changing the model in a chat
 pane also updates the selection used for its next message; changing reasoning

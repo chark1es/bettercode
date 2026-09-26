@@ -30,7 +30,7 @@ function provider(
 }
 
 describe("resolveProviderModelSelection", () => {
-  it("prefers Claude CLI over list order and a matching API model for a missing selection", () => {
+  it("keeps an explicitly selected Claude API provider", () => {
     const api = provider({ id: "anthropic", configured: true })
     const codex = provider({ id: "codex", configured: true })
     const claude = provider({ id: "claude", configured: true })
@@ -40,10 +40,32 @@ describe("resolveProviderModelSelection", () => {
         selectedProviderId: "anthropic",
         selectedModel: "anthropic-default",
       })
-    ).toEqual({ provider: claude, modelId: "claude-default" })
+    ).toEqual({ provider: api, modelId: "anthropic-default" })
   })
 
-  it.each(["anthropic", "anthropic-api", "claude-api", "claude-terminal"])(
+  it("maps a stored Claude API provider ID to the visible API entry", () => {
+    const api = provider({
+      id: "anthropic-api",
+      providerKind: "anthropic",
+      models: [
+        {
+          id: "claude-opus-5-5",
+          name: "Claude Opus 5.5",
+          context: "1M",
+          tier: "Flagship",
+        },
+      ],
+    })
+    expect(
+      resolveProviderModelSelection({
+        providers: [api],
+        selectedProviderId: "anthropic",
+        selectedModel: "claude-opus-5-5",
+      })
+    ).toEqual({ provider: api, modelId: "claude-opus-5-5" })
+  })
+
+  it.each(["claude-terminal"])(
     "migrates %s to Claude CLI and retains a compatible model",
     (id) => {
       const claude = provider({ id: "claude", providerInstanceId: "claude" })
@@ -84,7 +106,7 @@ describe("resolveProviderModelSelection", () => {
     ).toEqual({ provider: codex, modelId: "codex-default" })
   })
 
-  it("tries Cursor, Grok CLI, then other configured providers without choosing Claude API", () => {
+  it("tries Cursor, Grok CLI, then configured API providers", () => {
     const api = provider({ id: "anthropic", configured: true })
     const openai = provider({ id: "openai", configured: true })
     const grok = provider({
@@ -101,15 +123,15 @@ describe("resolveProviderModelSelection", () => {
     expect(resolveDefaultProvider([api, openai, grok, codex, claude])).toBe(
       grok
     )
-    expect(resolveDefaultProvider([api, openai, codex, claude])).toBe(openai)
-    expect(resolveDefaultProvider([api, codex, claude])).toBeUndefined()
+    expect(resolveDefaultProvider([api, openai, codex, claude])).toBe(api)
+    expect(resolveDefaultProvider([api, codex, claude])).toBe(api)
     expect(
       resolveProviderModelSelection({
         providers: [api],
         selectedProviderId: "anthropic",
         selectedModel: "anthropic-default",
       }).provider
-    ).toBeUndefined()
+    ).toBe(api)
   })
 
   it("waits for Claude's startup probe and preserves an explicit valid Codex choice", () => {
@@ -220,7 +242,7 @@ describe("resolveProviderModelSelection", () => {
         ...input,
         providers: [{ ...codex, modelsReady: true }],
       }).modelId
-    ).toBe("gpt-5.6-sol")
+    ).toBe("gpt-6-astra")
   })
 
   it("does not downgrade a stored reasoning level before model capabilities arrive", () => {
@@ -264,7 +286,7 @@ describe("resolveProviderModelSelection", () => {
     })
   })
 
-  it("falls back to the selected provider's first model when the persisted model is stale", () => {
+  it("keeps a retired model ID until the user chooses a replacement", () => {
     const codex = provider({
       id: "codex",
       providerKind: "codex",
@@ -282,7 +304,7 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: codex,
-      modelId: "gpt-5.5",
+      modelId: "gpt-4.1",
     })
   })
 
@@ -394,11 +416,11 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: BetterC0de,
-      modelId: "openai/gpt-5",
+      modelId: "sonnet-4.6",
     })
   })
 
-  it("normalizes provider aliases even before runtime model discovery", () => {
+  it("keeps an alias until runtime model discovery can validate it", () => {
     const cursor = provider({
       id: "cursor",
       providerKind: "cursor",
@@ -414,11 +436,11 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: cursor,
-      modelId: "composer-2",
+      modelId: "composer",
     })
   })
 
-  it("uses a locked provider instance and resolves the model within that instance", () => {
+  it("keeps a saved model ID on a locked provider instance", () => {
     const defaultCodex = provider({
       id: "codex",
       providerKind: "codex",
@@ -445,7 +467,7 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: workCodex,
-      modelId: "gpt-5.4",
+      modelId: "gpt-5.5",
     })
   })
 
@@ -484,7 +506,7 @@ describe("resolveProviderModelSelection", () => {
     })
   })
 
-  it("uses a locked continuation provider from the same provider kind", () => {
+  it("keeps a saved model ID on a locked continuation provider", () => {
     const defaultCodex = provider({
       id: "codex",
       providerKind: "codex",
@@ -513,7 +535,7 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: workCodex,
-      modelId: "gpt-5.4",
+      modelId: "gpt-5.5",
     })
   })
 
@@ -553,7 +575,7 @@ describe("resolveProviderModelSelection", () => {
     })
   })
 
-  it("coerces GPT 5.5 Extra High to Claude Opus 4.7 Max when switching providers", () => {
+  it("preserves saved reasoning while a foreign model needs explicit replacement", () => {
     const codex = provider({
       id: "codex",
       providerKind: "codex",
@@ -602,8 +624,8 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: claude,
-      modelId: "claude-opus-4-7",
-      thinkingMode: "max",
+      modelId: "gpt-5.5",
+      thinkingMode: "xhigh",
     })
     expect(
       resolveProviderModelThinkingSelection({
@@ -614,8 +636,8 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: claude,
-      modelId: "claude-opus-4-7",
-      thinkingMode: "max",
+      modelId: "gpt-5.5",
+      thinkingMode: "Extra High",
     })
     expect(
       resolveProviderModelThinkingSelection({
@@ -626,12 +648,12 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: claude,
-      modelId: "claude-opus-4-7",
-      thinkingMode: "max",
+      modelId: "gpt-5.5",
+      thinkingMode: "ExtraHigh",
     })
   })
 
-  it("coerces GPT Ultra Think to Claude Opus 4.7 Ultrathink when switching providers", () => {
+  it("preserves Ultra Think on a saved model before replacement", () => {
     const codex = provider({
       id: "codex",
       providerKind: "codex",
@@ -680,12 +702,12 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: claude,
-      modelId: "claude-opus-4-7",
-      thinkingMode: "ultrathink",
+      modelId: "gpt-5.5",
+      thinkingMode: "Ultra Think",
     })
   })
 
-  it("coerces GPT Extra High to Claude CLI Max for short Opus 4.7 model ids", () => {
+  it("preserves reasoning on a saved model unavailable to Claude CLI", () => {
     const codex = provider({
       id: "codex",
       providerKind: "codex",
@@ -717,8 +739,8 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: claudeCli,
-      modelId: "opus-4-7",
-      thinkingMode: "max",
+      modelId: "gpt-5.5",
+      thinkingMode: "xHigh",
     })
     expect(
       resolveProviderModelThinkingSelection({
@@ -729,8 +751,8 @@ describe("resolveProviderModelSelection", () => {
       })
     ).toEqual({
       provider: claudeCli,
-      modelId: "opus-4-7",
-      thinkingMode: "max",
+      modelId: "gpt-5.5",
+      thinkingMode: "ExtraHigh",
     })
   })
 

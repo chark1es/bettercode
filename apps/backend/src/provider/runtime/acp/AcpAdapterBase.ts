@@ -22,7 +22,7 @@ import type { EventNdjsonLogger } from "../EventNdjsonLogger"
 import { acpTurnFailureMessage } from "../cursor/AcpJsonRpcClient"
 import {
   mergeCursorCustomModels as mergeAcpCustomModels,
-  resolveCursorAcpBaseModelId as resolveAcpBaseModelId,
+  resolveCursorAcpAdvertisedModelId as resolveAcpAdvertisedModelId,
   resolveCursorAcpConfigUpdates as resolveAcpConfigUpdates,
 } from "../cursor/CursorAcpSupport"
 import {
@@ -75,7 +75,7 @@ import {
  */
 
 const ACP_RESUME_VERSION = 1 as const
-const METADATA_CACHE_TTL_MS = 5 * 60 * 1000
+const METADATA_CACHE_TTL_MS = 15 * 60 * 1000
 const ACP_PLAN_MODE_ALIASES = ["plan", "architect"]
 const ACP_IMPLEMENT_MODE_ALIASES = [
   "code",
@@ -206,9 +206,24 @@ export interface AcpProviderProfile<
   readonly runtimeProfile: AcpRuntimeProfile<TSettings>
   readonly models: {
     /** Base list used when the probe is skipped or fails (before custom-model merge). */
-    readonly fallback: (options: TOptions) => ReadonlyArray<ProviderModel>
-    /** Live inventory read off a started probe session; empty = use fallback. */
+    readonly fallback: (
+      options: TOptions,
+      identity: string | null
+    ) => ReadonlyArray<ProviderModel>
+    /** Live inventory read off a started probe session; empty usually uses fallback. */
     readonly fromStarted: (started: AcpStarted) => ReadonlyArray<ProviderModel>
+    /** Some agents explicitly advertise an empty model list. */
+    readonly isEmptyAuthoritative?: (started: AcpStarted) => boolean
+    /** Namespace a cached list by the account selected in the CLI. */
+    readonly cacheIdentity?: (
+      options: TOptions,
+      input: { readonly force: boolean }
+    ) => string | null | Promise<string | null>
+    readonly onLiveModels?: (
+      options: TOptions,
+      models: ReadonlyArray<ProviderModel>,
+      identity: string | null
+    ) => void
     /**
      * Which timestamp the cache gets when `isConfigured()` is false:
      * `"probe-start"` = the `Date.now()` captured on entry to
@@ -276,6 +291,12 @@ interface RuntimeCleanupContext extends CleanupQuarantineState {
   readonly runtime: AcpRuntime
 }
 
+interface PendingSessionStartup {
+  runtime: AcpRuntime | null
+  cancelled: boolean
+  promise: Promise<ProviderSession> | null
+}
+
 interface PendingApproval {
   readonly permissionRequest: AcpPermissionRequest
   readonly resolve: (decision: ProviderApprovalDecision) => void
@@ -289,8 +310,7 @@ interface MetadataCache<T> {
 export class AcpAdapterBase<
   TSettings extends AcpRuntimeSettings,
   TOptions extends AcpAdapterOptions<TSettings>,
-> implements ProviderAdapterShape
-{
+> implements ProviderAdapterShape {
   readonly provider: ProviderKind
   readonly displayName: string
   readonly capabilities = CAPABILITIES
@@ -301,8 +321,9 @@ export class AcpAdapterBase<
     AcpRuntime,
     RuntimeCleanupContext
   >()
-  private startupInProgress = false
+  private pendingSessionStartup: PendingSessionStartup | null = null
   private modelsCache: MetadataCache<ReadonlyArray<ProviderModel>> | null = null
+  private modelsCacheIdentity: string | null = null
   // In-flight dedup: concurrent cold-cache callers (several listInstances
   // at app start) must share ONE probe child instead of spawning one each.
   private modelsInFlight: Promise<ReadonlyArray<ProviderModel>> | null = null
@@ -319,16 +340,28 @@ export class AcpAdapterBase<
     return this.profile.isConfigured(this.options)
   }
 
-  async availableModels(): Promise<ReadonlyArray<ProviderModel>> {
+  async availableModels(
+    input: { readonly force?: boolean } = {}
+  ): Promise<ReadonlyArray<ProviderModel>> {
     const now = Date.now()
+    const identity =
+      (await this.profile.models.cacheIdentity?.(this.options, {
+        force: input.force === true,
+      })) ?? null
+    if (identity !== this.modelsCacheIdentity) {
+      this.modelsCacheIdentity = identity
+      this.modelsCache = null
+      this.modelsInFlight = null
+    }
     if (
+      !input.force &&
       this.modelsCache &&
       now - this.modelsCache.checkedAt < METADATA_CACHE_TTL_MS
     ) {
       return this.modelsCache.value
     }
     if (this.modelsInFlight) return this.modelsInFlight
-    const probe = this.fetchAvailableModels(now).finally(() => {
+    const probe = this.fetchAvailableModels(now, identity).finally(() => {
       if (this.modelsInFlight === probe) this.modelsInFlight = null
     })
     this.modelsInFlight = probe
@@ -336,20 +369,22 @@ export class AcpAdapterBase<
   }
 
   private async fetchAvailableModels(
-    startedAt: number
+    startedAt: number,
+    identity: string | null
   ): Promise<ReadonlyArray<ProviderModel>> {
     const fallback = mergeAcpCustomModels(
-      this.profile.models.fallback(this.options),
+      this.profile.models.fallback(this.options, identity),
       this.options.customModels ?? []
     )
     if (!this.isConfigured()) {
-      this.modelsCache = {
-        checkedAt:
-          this.profile.models.unconfiguredCheckedAt === "probe-start"
-            ? startedAt
-            : Date.now(),
-        value: fallback,
-      }
+      if (identity === this.modelsCacheIdentity)
+        this.modelsCache = {
+          checkedAt:
+            this.profile.models.unconfiguredCheckedAt === "probe-start"
+              ? startedAt
+              : Date.now(),
+          value: fallback,
+        }
       return fallback
     }
 
@@ -364,16 +399,24 @@ export class AcpAdapterBase<
         const started = await runtime.start()
         const live = this.profile.models.fromStarted(started)
         const models =
-          live.length > 0
+          live.length > 0 || this.profile.models.isEmptyAuthoritative?.(started)
             ? mergeAcpCustomModels(live, this.options.customModels ?? [])
             : fallback
-        this.modelsCache = { checkedAt: Date.now(), value: models }
+        if (identity === this.modelsCacheIdentity) {
+          this.modelsCache = { checkedAt: Date.now(), value: models }
+          if (
+            live.length > 0 ||
+            this.profile.models.isEmptyAuthoritative?.(started)
+          )
+            this.profile.models.onLiveModels?.(this.options, live, identity)
+        }
         return models
       } finally {
         await this.closeTrackedRuntime(runtime)
       }
     } catch {
-      this.modelsCache = { checkedAt: Date.now(), value: fallback }
+      if (identity === this.modelsCacheIdentity)
+        this.modelsCache = { checkedAt: Date.now(), value: fallback }
       return fallback
     }
   }
@@ -387,7 +430,7 @@ export class AcpAdapterBase<
   }
 
   async startSession(input: AcpStartSessionInput): Promise<ProviderSession> {
-    if (this.startupInProgress) {
+    if (this.pendingSessionStartup) {
       throw Object.assign(
         new Error(
           `Another ${this.profile.label} ACP startup cleanup is already in progress.`
@@ -398,16 +441,34 @@ export class AcpAdapterBase<
         }
       )
     }
-    this.startupInProgress = true
+    const startup: PendingSessionStartup = {
+      runtime: null,
+      cancelled: false,
+      promise: null,
+    }
+    this.pendingSessionStartup = startup
+    const operation = this.startSessionWithAdmission(input, startup)
+    startup.promise = operation
     try {
-      return await this.startSessionWithAdmission(input)
+      return await operation
     } finally {
-      this.startupInProgress = false
+      if (this.pendingSessionStartup === startup) {
+        this.pendingSessionStartup = null
+      }
+    }
+  }
+
+  private assertStartupActive(startup: PendingSessionStartup): void {
+    if (startup.cancelled) {
+      throw new Error(
+        `${this.profile.label} ACP session startup was cancelled.`
+      )
     }
   }
 
   private async startSessionWithAdmission(
-    input: AcpStartSessionInput
+    input: AcpStartSessionInput,
+    startup: PendingSessionStartup
   ): Promise<ProviderSession> {
     try {
       await this.closeAllRuntimeCleanupQuarantines()
@@ -424,21 +485,40 @@ export class AcpAdapterBase<
         }
       )
     }
+    this.assertStartupActive(startup)
     const key = input.threadId as string
     const existing = this.sessions.get(key)
     if (existing) await this.stopSession(input.threadId)
+    this.assertStartupActive(startup)
 
     const cwd = normalizeCwd(input.cwd)
     const resumeSessionId = readAcpResumeSessionId(input.resumeCursor)
-    const configuredServers = (await this.resolveSessionMcpServers(cwd)).filter(server => server.name !== "betterc0de_orchestrator")
+    const configuredServers = (await this.resolveSessionMcpServers(cwd)).filter(
+      (server) => server.name !== "betterc0de_orchestrator"
+    )
+    this.assertStartupActive(startup)
     const teamServer = await this.options.resolveOrchestratorServer?.(cwd, key)
-    const mcpServers: ReadonlyArray<AcpMcpServer> = teamServer ? [...configuredServers, { name: "betterc0de_orchestrator", type: "http", url: teamServer.url, headers: Object.entries(teamServer.headers).map(([name, value]) => ({ name, value })) }] : configuredServers
+    this.assertStartupActive(startup)
+    const mcpServers: ReadonlyArray<AcpMcpServer> = teamServer
+      ? [
+          ...configuredServers,
+          {
+            name: "betterc0de_orchestrator",
+            type: "http",
+            url: teamServer.url,
+            headers: Object.entries(teamServer.headers).map(
+              ([name, value]) => ({ name, value })
+            ),
+          },
+        ]
+      : configuredServers
     const runtime = await this.createRuntime(
       cwd,
       resumeSessionId,
       key,
       mcpServers
     )
+    startup.runtime = runtime
     const pendingApprovals = new Map<string, PendingApproval>()
     const pendingUserInputs = new Map<string, PendingUserInput>()
     let context: SessionContext | null = null
@@ -569,7 +649,9 @@ export class AcpAdapterBase<
           },
         })
       } catch (error) {
-        pendingApprovals.get(requestId)?.resolve({ kind: "tool_approval", decision: "deny" })
+        pendingApprovals
+          .get(requestId)
+          ?.resolve({ kind: "tool_approval", decision: "deny" })
         throw error
       }
       const decision = await decisionPromise
@@ -615,13 +697,16 @@ export class AcpAdapterBase<
 
     let started: Awaited<ReturnType<AcpRuntime["start"]>>
     try {
+      this.assertStartupActive(startup)
       started = await runtime.start()
+      this.assertStartupActive(startup)
       await this.applySessionConfiguration({
         runtime,
         runtimeMode: input.runtimeMode ?? null,
         chatMode: null,
         modelSelection: this.modelSelectionForInstance(input.modelSelection),
       })
+      this.assertStartupActive(startup)
     } catch (error) {
       unsubscribeRuntime()
       unsubscribeExit()
@@ -703,10 +788,15 @@ export class AcpAdapterBase<
     }))
   }
 
-  async needsSessionConfigurationRefresh(input: { threadId: ThreadId; cwd?: string | null }): Promise<boolean> {
+  async needsSessionConfigurationRefresh(input: {
+    threadId: ThreadId
+    cwd?: string | null
+  }): Promise<boolean> {
     const context = this.sessions.get(input.threadId)
     if (!context || !this.options.resolveOrchestratorServer) return false
-    const server = input.cwd ? await this.options.resolveOrchestratorServer(input.cwd, input.threadId) : null
+    const server = input.cwd
+      ? await this.options.resolveOrchestratorServer(input.cwd, input.threadId)
+      : null
     return context.orchestrationConfig !== JSON.stringify(server ?? null)
   }
 
@@ -730,7 +820,8 @@ export class AcpAdapterBase<
 
     const turnId = randomUUID() as TurnId
     const modelSelection = this.modelSelectionForInstance(input.modelSelection)
-    const runtimeMode = runtimeModeForAcpTurn(input) ?? context.session.runtimeMode ?? null
+    const runtimeMode =
+      runtimeModeForAcpTurn(input) ?? context.session.runtimeMode ?? null
     // Install the current ceiling before configuration can invoke callbacks.
     context.permissionRuntimeMode = runtimeMode
     await this.applySessionConfiguration({
@@ -740,8 +831,9 @@ export class AcpAdapterBase<
       modelSelection,
     })
     this.updateSession(context, { runtimeMode })
-    const modelId = resolveAcpBaseModelId(
-      modelSelection?.model ?? input.modelId
+    const modelId = resolveAcpAdvertisedModelId(
+      modelSelection?.model ?? input.modelId,
+      context.runtime.getConfigOptions()
     )
     context.activeTurnId = turnId
     context.activeDispatchTurnId = input.dispatchTurnId ?? null
@@ -936,6 +1028,21 @@ export class AcpAdapterBase<
   }
 
   async stopAll(): Promise<void> {
+    const startup = this.pendingSessionStartup
+    if (startup) {
+      startup.cancelled = true
+      // A session is registered only after its ACP handshake completes. Stop
+      // the child already starting and wait for that handshake to settle so a
+      // late completion cannot create a session after stopAll returned.
+      if (startup.runtime) {
+        await this.closeTrackedRuntime(startup.runtime).catch(() => {
+          // closeAllRuntimeCleanupQuarantines retries and reports this failure.
+        })
+      }
+      await startup.promise?.catch(() => {
+        // A cancelled startup is expected; cleanup is checked below.
+      })
+    }
     const results = await Promise.allSettled(
       Array.from(this.sessions.keys()).map((threadId) =>
         this.stopSession(threadId as ThreadId)
@@ -1218,7 +1325,9 @@ export class AcpAdapterBase<
 
   private updateSession(
     context: SessionContext,
-    patch: Partial<Pick<ProviderSession, "status" | "activeTurnId" | "runtimeMode">>
+    patch: Partial<
+      Pick<ProviderSession, "status" | "activeTurnId" | "runtimeMode">
+    >
   ): void {
     context.session = {
       ...context.session,
@@ -1298,7 +1407,10 @@ export class AcpAdapterBase<
     readonly modelSelection?: ModelSelection
   }): Promise<void> {
     if (input.modelSelection) {
-      const model = resolveAcpBaseModelId(input.modelSelection.model)
+      const model = resolveAcpAdvertisedModelId(
+        input.modelSelection.model,
+        input.runtime.getConfigOptions()
+      )
       if (this.profile.setModelFailure === "ignore") {
         // The agent may not accept a synthetic "model" configId when its
         // session advertises no model picker — treat a rejected model update
@@ -1480,7 +1592,10 @@ function findModeByAliases(
   return undefined
 }
 
-function findModeByExactAliases(modes: ReadonlyArray<AcpMode>, aliases: ReadonlyArray<string>): AcpMode | undefined {
+function findModeByExactAliases(
+  modes: ReadonlyArray<AcpMode>,
+  aliases: ReadonlyArray<string>
+): AcpMode | undefined {
   const priorities = new Map<string, number>()
   aliases.forEach((alias, index) => {
     const key = alias.toLowerCase()
@@ -1489,8 +1604,14 @@ function findModeByExactAliases(modes: ReadonlyArray<AcpMode>, aliases: Readonly
   let chosen: AcpMode | undefined
   let best = Infinity
   for (const mode of modes) {
-    const rank = Math.min(priorities.get(mode.id.toLowerCase()) ?? Infinity, priorities.get(mode.name.toLowerCase()) ?? Infinity)
-    if (rank < best) { best = rank; chosen = mode }
+    const rank = Math.min(
+      priorities.get(mode.id.toLowerCase()) ?? Infinity,
+      priorities.get(mode.name.toLowerCase()) ?? Infinity
+    )
+    if (rank < best) {
+      best = rank
+      chosen = mode
+    }
   }
   return chosen
 }
@@ -1651,13 +1772,18 @@ function normalizeProviderRuntimeMode(
   if (typeof value !== "string") return null
   const trimmed = value.trim().toLowerCase()
   switch (trimmed) {
-    case "bypass": return "full-access"
+    case "bypass":
+      return "full-access"
     case "full":
-    case "allow-edits": return "auto-accept-edits"
-    case "read": return "read-only"
+    case "allow-edits":
+      return "auto-accept-edits"
+    case "read":
+      return "read-only"
     case "ask":
-    case "ask-on-edit": return "approval-required"
-    default: return trimmed.length > 0 ? trimmed : null
+    case "ask-on-edit":
+      return "approval-required"
+    default:
+      return trimmed.length > 0 ? trimmed : null
   }
 }
 
@@ -1665,10 +1791,14 @@ function runtimeModeForAcpTurn(
   input: Pick<ProviderSendTurnInput, "chatMode" | "permissionLevel">
 ): string | null {
   switch (input.chatMode?.trim().toLowerCase()) {
-    case "plan": return "plan"
-    case "ask": return "read-only"
-    case "security": return "security"
-    default: return normalizeProviderRuntimeMode(input.permissionLevel)
+    case "plan":
+      return "plan"
+    case "ask":
+      return "read-only"
+    case "security":
+      return "security"
+    default:
+      return normalizeProviderRuntimeMode(input.permissionLevel)
   }
 }
 

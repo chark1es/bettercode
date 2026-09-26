@@ -286,6 +286,33 @@ export function useChatSubmit({
       }
       const setSelectedModel = (id: string, providerId?: string) =>
         selectComposerModel(ensureThread(), id, providerId)
+      const requireAvailableModel = (
+        provider: UiProvider | undefined,
+        modelId: string
+      ): boolean => {
+        if (provider?.modelsReady === false) {
+          handleError(
+            new Error(
+              `The model list for ${provider.name} is still loading. Try again shortly.`
+            ),
+            { source: "chat-submit" }
+          )
+          return false
+        }
+        if (
+          provider?.modelsReady !== true ||
+          provider.models.some((model) => model.id === modelId)
+        )
+          return true
+        handleError(
+          new Error(
+            `Model ${modelId} is no longer available for ${provider.name}. Choose another model before sending.`
+          ),
+          { source: "chat-submit" }
+        )
+        openModelPicker?.()
+        return false
+      }
 
       const ownsPreparation =
         originThreadId && !preparingThreads.has(originThreadId)
@@ -305,6 +332,8 @@ export function useChatSubmit({
             selectedProvider,
             selectedModel
           )
+          if (!requireAvailableModel(selectedProvider, selectedModel))
+            return false
           const modelId = resolveDispatchModelId(
             target.providerKind,
             selectedModel
@@ -737,6 +766,7 @@ export function useChatSubmit({
         )
         const turnProvider = projectModelOverride?.provider ?? selectedProvider
         const turnModel = projectModelOverride?.modelId ?? selectedModel
+        if (!requireAvailableModel(turnProvider, turnModel)) return false
         const attachments = normalizeChatAttachments(msg.files)
         const browserContext = browserElementsPrompt(browserElements)
         if (browserContext) messageText = `${browserContext}\n\n${messageText}`

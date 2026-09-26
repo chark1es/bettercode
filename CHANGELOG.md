@@ -8,6 +8,26 @@ A `v<version>` tag can only be released when this file has a `## [<version>]` se
 
 ### Fixed
 
+- **Cursor CLI detection and models.** Native Windows installs are found without adding the CLI to `PATH`. Cursor's available models and options come from its signed-in ACP session, with account-specific cached results; provider refresh rechecks them. Model selection uses the exact ACP value, and stable CLI channels are no longer rejected by a fixed gate.
+- **Slow Cursor ACP starts no longer immediately disable the provider.** Cursor and Grok ACP session starts and stops use longer bounded deadlines, and stopping a provider cancels a session that is still starting before it can leave a late process behind.
+
+### Added
+
+- Successful merges to `main` now prepare and tag the next shared version after CI passes, then run the full Release workflow before publishing. The `Unreleased` section becomes that version's release notes.
+- Agent mode can open the existing Browser Preview in the right workspace panel, with navigation, element selection, inspector, console, and visual changes routed to the focused chat.
+- **Account-backed model catalogs.** Claude, Codex, and Grok CLI models come from each logged-in CLI; Claude API, OpenAI, and xAI models come from the configured API account. Catalogs refresh every 15 minutes, can be refreshed manually, and keep the last successful account-specific list. Claude API is available again as a separate picker provider, and Claude Opus 5.5 supports its 1M context and adaptive thinking with medium default effort. Existing chats keep a withdrawn model ID visible until another model is chosen, and favorites remain saved while a model is unavailable.
+
+## [0.1.0-beta.3] - 2026-09-25
+
+### Distribution and known issues
+
+- Desktop installers remain unsigned. Windows and macOS users install updates manually; see [code signing](docs/development/code-signing.md) for first-launch steps.
+- BetterC0de Remote is built and tested in CI, but its APK and TestFlight build are not published until mobile release credentials and distribution are enabled.
+- `npm audit --omit=dev` reports 14 moderate findings in the Expo and Expo Router dependency tree, with no high or critical findings. The locked mobile dependencies remain in this beta; address the findings with a separate mobile dependency update.
+
+### Fixed
+
+- **macOS CLI discovery.** Finder-launched builds can resolve installed Claude, Codex, and Grok command-line tools when the app receives a minimal `PATH`, including normal turns and provider handoffs.
 - **macOS Apple Silicon downloads contain an Apple Silicon build.** In 0.1.0-beta.2, `BetterC0de-0.1.0-beta.2-arm64-mac.zip` and `BetterC0de-0.1.0-beta.2-arm64.dmg` contain the Intel (x86_64) app. The target configuration overrode the build's architecture flag, so each Mac build job packaged its one app under both architectures' names, and the Intel job's files are the ones that were published.
 - **macOS update metadata lists both architectures.** `latest-mac.yml` was taken from whichever Mac job uploaded last; it is now merged from both, and every entry is checked against the published file's sha512 before release.
 - **Start-up failures explain themselves.** When the background service cannot start, the dialog shows the lines the service printed and what to do (reinstall the matching build, rebuild native modules, free disk space, fix folder permissions), instead of only "Failed to start backend: Node backend exited (code=1 signal=none)".
@@ -33,6 +53,7 @@ A `v<version>` tag can only be released when this file has a `## [<version>]` se
 
 ### Added
 
+- Contributor entry points for coding agents, a brand/UI/theme contribution guide, and a fast CI check that keeps desktop light, dark, built-in, and imported theme tokens in sync.
 - `npm run release:check`: one command from a clean `npm ci` through lint, type-checks, all test suites, the production build, packaging, a launch of the packaged app, the installers, and an install → launch → uninstall test of the installers on a clean machine.
 - `npm run mobile:check`, part of the `release:check` build step: checks the phone app's configuration (identifiers, versions, network policy, Android ABIs), that its native dependencies match the Expo SDK without duplicates, and that the Android, iOS and web bundles build.
 - The phone app has its own icons and splash screen, rendered from the desktop logo (`npm run mobile:icons`).
@@ -87,7 +108,7 @@ A `v<version>` tag can only be released when this file has a `## [<version>]` se
 
 ### Known issues
 
-- The macOS **arm64** downloads contain the Intel build (see Unreleased → Fixed). Apple Silicon Macs run it through Rosetta 2; macOS offers to install Rosetta on first launch if it is missing.
+- The macOS **arm64** downloads contain the Intel build (see 0.1.0-beta.3 → Fixed). Apple Silicon Macs run it through Rosetta 2; macOS offers to install Rosetta on first launch if it is missing.
 - `SHA256SUMS-macOS-arm64.txt` does not match the published arm64 files, and `SHA256SUMS-Windows-x64.txt` lists the installer as `BetterC0de Setup 0.1.0-beta.2.exe` while the download is named `BetterC0de-Setup-0.1.0-beta.2.exe`.
 - No `.deb`, `.rpm`, `latest-linux.yml` or Linux checksum file was published, because the Linux release job failed. The AppImage and `.tar.gz` are available.
 - All builds are unsigned. See [code signing](docs/development/code-signing.md) for what users see and how to get past it.

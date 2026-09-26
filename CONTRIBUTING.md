@@ -2,6 +2,8 @@
 
 Thanks for helping improve BetterC0de. Start with the [installation and setup guide](INSTALL.md), the [development guide](docs/development/README.md) and the [architecture overview](docs/architecture/overview.md).
 
+If you use a coding agent, give it [AGENTS.md](AGENTS.md) as its entry point before it edits files. Read the [CI guide](docs/development/ci.md), [brand guide](BRAND.md), and [UI and theme guide](docs/design-system.md) yourself when the change touches those areas. The guidance applies to human and agent contributions alike.
+
 ## Before you start
 
 Search the [issues](https://github.com/kerim0x1/bettercode/issues) for existing reports. For a substantial feature or architectural change, describe the problem and proposed approach in an issue before implementing it. Small, focused fixes can go straight to a pull request.
@@ -57,10 +59,10 @@ Fix failing tests at their cause. Do not skip, delete or loosen a test to get a 
 
 ## Pull requests
 
-Explain the problem, the resulting behavior, and how you checked it. Include screenshots for visible UI changes and note any platform you could not test. Avoid unrelated formatting changes or dependency upgrades.
+Explain the problem, the resulting behavior, and how you checked it. Include screenshots for visible UI changes and note any platform you could not test. For UI changes, review default dark, white, system, and imported themes as applicable. The fast `npm run check:contributor-contract` job checks shared theme token compatibility on every push and pull request. Avoid unrelated formatting changes or dependency upgrades.
 
 Keep discussion respectful and focused on the work. For suspected vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue with exploit details.
 
 ## Releases
 
-Maintainers release by tag; the full procedure is in the [release checklist](docs/release-checklist.md). In short: bump the version in every workspace, move the `Unreleased` changelog entries under the new version, then tag `v<version>` and push the tag. The pre-push hook and the Release workflow both run `release:check`, and the release is published only after every platform passed.
+After a merge to `main`, CI must pass before the Automatic release workflow prepares a versioned commit reachable from a new `v<version>` tag and explicitly starts Release on that tag. The protected `main` branch stays unchanged; its version may trail the latest tag. Release runs `release:check` on every platform and publishes only after every gate passes. Maintainers can still release by tag manually; see the [release checklist](docs/release-checklist.md). Keep `Unreleased` useful: new entries since the last release become public notes automatically.

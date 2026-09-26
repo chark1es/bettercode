@@ -39,6 +39,7 @@ import type { ProviderRuntimeInstance } from "./ProviderHub"
 import type { EventNdjsonLogger } from "./EventNdjsonLogger"
 
 interface ProviderInstanceManagerOptions {
+  readonly modelCacheDir?: string
   readonly clientInfo: {
     readonly name: string
     readonly title: string
@@ -155,6 +156,7 @@ export class ProviderInstanceManager {
         readConfigString(config.config, "homePath")
       )
       const adapter = new CodexAdapter({
+        modelCacheDir: this.options.modelCacheDir,
         resolveCodeSearchServer: this.options.resolveCodeSearchServer,
         resolveOrchestratorServer: this.options.resolveOrchestratorServer,
         providerInstanceId: config.instanceId,
@@ -201,6 +203,7 @@ export class ProviderInstanceManager {
         readConfigString(config.config, "homePath")
       )
       const adapter = new ClaudeAdapter({
+        modelCacheDir: this.options.modelCacheDir,
         resolveCodeSearchServer: this.options.resolveCodeSearchServer,
         resolveOrchestratorServer: this.options.resolveOrchestratorServer,
         providerInstanceId: config.instanceId,
@@ -253,6 +256,7 @@ export class ProviderInstanceManager {
         readConfigString(config.config, "homePath")
       )
       const adapter = new ClaudeTerminalAdapter({
+        modelCacheDir: this.options.modelCacheDir,
         providerInstanceId: config.instanceId,
         continuationKey,
         binaryPath,
@@ -304,16 +308,19 @@ export class ProviderInstanceManager {
         provider: "cursor",
         continuationKey,
         version: null,
-        statusProbe: () =>
+        statusProbe: (input) =>
           probeCursorProviderStatus({
             binaryPath,
             env,
+            refresh: input.refresh,
           }),
         adapter: new CursorAcpAdapter({
           providerInstanceId: config.instanceId,
           continuationKey,
           binaryPath,
           apiEndpoint: readConfigString(config.config, "apiEndpoint"),
+          modelCacheDir: this.options.modelCacheDir,
+          statusEnv: env,
           environment,
           customModels: readConfigStringArray(config.config, "customModels"),
           clientInfo: this.options.clientInfo,
@@ -345,6 +352,7 @@ export class ProviderInstanceManager {
             env,
           }),
         adapter: new GrokAcpAdapter({
+          modelCacheDir: this.options.modelCacheDir,
           providerInstanceId: config.instanceId,
           continuationKey,
           binaryPath: configuredBinaryPath,
