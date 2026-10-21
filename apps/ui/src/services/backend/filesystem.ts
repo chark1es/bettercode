@@ -1,55 +1,32 @@
-import { httpInvoke } from "./runtime"
+import type {
+  FilesystemDrive,
+  FilesystemDriveKind,
+  FilesystemDrivesResult,
+  FilesystemListEntry,
+  FilesystemListResult,
+  FilesystemSearchHit,
+  FilesystemSearchResult,
+} from "@betterc0de/schema"
+import { invokeContract } from "./contracts"
 
-export interface ListEntry {
-  name: string
-  path: string
-  isDir: boolean
-  isSymlink: boolean
-  size: number | null
-  mtime: number | null
-}
+// The `/filesystem/*` calls go through their shared contracts
+// (`@betterc0de/schema/http-contracts`); the records are defined once, in
+// `@betterc0de/schema`, for the backend, this renderer and the phone app.
 
-export interface ListResult {
-  path: string
-  parent: string | null
-  entries: ListEntry[]
-  truncated: boolean
-}
-
-export interface SearchHit {
-  path: string
-  name: string
-  isDir: boolean
-  score: number
-}
-
-export interface SearchResult {
-  entries: SearchHit[]
-  truncated: boolean
-  tookMs: number
-}
-
-export type DriveKind = "drive" | "home" | "volume" | "shortcut" | "root"
-
-export interface DriveEntry {
-  path: string
-  label: string
-  kind: DriveKind
-  reachable: boolean
-}
-
-export interface DrivesResult {
-  platform: "win32" | "darwin" | "linux" | string
-  entries: DriveEntry[]
-}
+export type ListEntry = FilesystemListEntry
+export type ListResult = FilesystemListResult
+export type SearchHit = FilesystemSearchHit
+export type SearchResult = FilesystemSearchResult
+export type DriveKind = FilesystemDriveKind
+export type DriveEntry = FilesystemDrive
+export type DrivesResult = FilesystemDrivesResult
 
 export function listDirectoryFs(
   path: string,
-  opts: { showHidden?: boolean; signal?: AbortSignal } = {},
+  opts: { showHidden?: boolean; offset?: number; signal?: AbortSignal } = {}
 ): Promise<ListResult> {
-  return httpInvoke<ListResult>("/filesystem/list", {
-    method: "POST",
-    body: { path, showHidden: opts.showHidden ?? false },
+  return invokeContract("filesystemList", {
+    body: { path, showHidden: opts.showHidden ?? false, offset: opts.offset },
     signal: opts.signal,
   })
 }
@@ -57,18 +34,16 @@ export function listDirectoryFs(
 export function searchTreeFs(
   root: string,
   query: string,
-  opts: { limit?: number; signal?: AbortSignal } = {},
+  opts: { limit?: number; signal?: AbortSignal } = {}
 ): Promise<SearchResult> {
-  return httpInvoke<SearchResult>("/filesystem/search", {
-    method: "POST",
+  return invokeContract("filesystemSearch", {
     body: { root, query, limit: opts.limit },
     signal: opts.signal,
   })
 }
 
-export function enumerateDrivesFs(opts: { signal?: AbortSignal } = {}): Promise<DrivesResult> {
-  return httpInvoke<DrivesResult>("/filesystem/drives", {
-    method: "GET",
-    signal: opts.signal,
-  })
+export function enumerateDrivesFs(
+  opts: { signal?: AbortSignal } = {}
+): Promise<DrivesResult> {
+  return invokeContract("filesystemDrives", { signal: opts.signal })
 }

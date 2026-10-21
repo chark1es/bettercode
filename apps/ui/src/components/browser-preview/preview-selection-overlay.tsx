@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { parseSelectedElement } from "./preview-messages"
 import type { SelectedElement } from "./types"
 
 export function PreviewSelectionOverlay({
@@ -21,24 +22,9 @@ export function PreviewSelectionOverlay({
     const result = await execute(
       `window.__BC_PREVIEW__?.inspectPoint(${x}, ${y})`
     )
-    if (!result || typeof result !== "object") return null
-    const element = result as SelectedElement
-    return typeof element.selector === "string" &&
-      typeof element.tagName === "string" &&
-      element.rect &&
-      element.viewport &&
-      [
-        element.rect.x,
-        element.rect.y,
-        element.rect.w,
-        element.rect.h,
-        element.viewport.width,
-        element.viewport.height,
-      ].every(Number.isFinite) &&
-      element.viewport.width > 0 &&
-      element.viewport.height > 0
-      ? element
-      : null
+    // The overlay draws against the page viewport, so it needs one.
+    const element = parseSelectedElement(result)
+    return element?.viewport ? element : null
   }
 
   useEffect(() => {
@@ -62,8 +48,14 @@ export function PreviewSelectionOverlay({
       event.stopPropagation()
       const bounds = node.getBoundingClientRect()
       point.current = {
-        x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width))),
-        y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / Math.max(1, bounds.height))),
+        x: Math.max(
+          0,
+          Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width))
+        ),
+        y: Math.max(
+          0,
+          Math.min(1, (event.clientY - bounds.top) / Math.max(1, bounds.height))
+        ),
       }
       const unit =
         event.deltaMode === 1
@@ -71,7 +63,8 @@ export function PreviewSelectionOverlay({
           : event.deltaMode === 2
             ? node.clientHeight
             : 1
-      dx += (event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX) * unit
+      dx +=
+        (event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX) * unit
       dy += (event.shiftKey && !event.deltaX ? 0 : event.deltaY) * unit
       if (scrollFrame) return
       scrollFrame = requestAnimationFrame(() => {

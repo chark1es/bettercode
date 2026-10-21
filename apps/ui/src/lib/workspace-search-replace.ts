@@ -2,8 +2,11 @@ import {
   readFile,
   writeFile,
   type WorkspaceContentSearchResult,
-} from "@/services/backend"
-import { normalizeEditorPath, resolveWorkspaceFilePath } from "@/lib/editor-path"
+} from "@/services/backend/workspaceApi"
+import {
+  normalizeEditorPath,
+  resolveWorkspaceFilePath,
+} from "@/lib/editor-path"
 import { useEditorStore } from "@/lib/editor-store"
 import { replaceLiteralInContent } from "@/lib/workspace-replace"
 

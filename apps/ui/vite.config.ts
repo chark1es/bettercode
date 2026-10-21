@@ -34,20 +34,29 @@ import { defineConfig, type Plugin } from "vite"
 // ─────────────────────────────────────────────────────────────────────
 const VENDOR_CHUNK_MAP: Record<string, readonly string[]> = {
   "vendor-react": [
-    "react", "react-dom", "scheduler",
-    "use-sync-external-store", "use-sync-external-store-shim",
+    "react",
+    "react-dom",
+    "scheduler",
+    "use-sync-external-store",
+    "use-sync-external-store-shim",
   ],
   "vendor-monaco": ["monaco-editor", "@monaco-editor"],
   "vendor-ui": [
     // Radix uses Floating UI, while cmdk imports Radix. Keep that dependency
     // cycle inside one chunk so its initialization stays under Rollup's control.
-    "@radix-ui", "radix-ui",
-    "class-variance-authority", "clsx", "tailwind-merge", "lucide-react",
-    "@floating-ui", "tippy.js", "cmdk",
-    "embla-carousel", "embla-carousel-react", "embla-carousel-reactive-utils",
+    "@radix-ui",
+    "radix-ui",
+    "class-variance-authority",
+    "clsx",
+    "tailwind-merge",
+    "lucide-react",
+    "@floating-ui",
+    "cmdk",
+    "embla-carousel",
+    "embla-carousel-react",
+    "embla-carousel-reactive-utils",
   ],
   "vendor-motion": ["motion", "framer-motion"],
-  "vendor-remotion": ["remotion", "@remotion"],
   // Streamdown core + every @streamdown plugin together, so the cycle
   // between core and plugins lives inside one chunk (Rollup handles
   // intra-chunk cycles correctly; only inter-chunk cycles cause TDZ).
@@ -75,18 +84,15 @@ const VENDOR_CHUNK_MAP: Record<string, readonly string[]> = {
   // (and shiki's grammars, and katex) async chunks. Listing either — or the
   // `@streamdown` scope as a whole — pins it back into this eager chunk and
   // undoes that.
-  "vendor-markdown": [
-    "streamdown",
-    "@streamdown/cjk", "@streamdown/mermaid",
-  ],
+  "vendor-markdown": ["streamdown", "@streamdown/cjk", "@streamdown/mermaid"],
   // Reached only through the deferred math plugin, so this resolves to an
   // async chunk rather than a preloaded one.
   "vendor-math": ["katex"],
-  "vendor-highlight": ["lowlight", "highlight.js"],
-  "vendor-ai-sdk": ["@anthropic-ai", "@modelcontextprotocol"],
+  // No rules for remotion, lowlight/highlight.js, fuse.js or the provider
+  // SDKs: the renderer imports none of them, so those chunks were never
+  // emitted and only suggested that the libraries ship.
   "vendor-zod": ["zod"],
   "vendor-tanstack": ["@tanstack"],
-  "vendor-search": ["fuse.js"],
   "vendor-color": ["color"],
   "vendor-sanitize": ["dompurify"],
 }
@@ -101,7 +107,10 @@ const VENDOR_CHUNK_MATCHERS: ReadonlyArray<readonly [string, RegExp]> =
     const alt = names
       .map((n) => n.replace(/[.+*?^${}()|[\]\\]/g, "\\$&"))
       .join("|")
-    return [chunk, new RegExp(`[\\\\/]node_modules[\\\\/](?:${alt})(?=[\\\\/])`)] as const
+    return [
+      chunk,
+      new RegExp(`[\\\\/]node_modules[\\\\/](?:${alt})(?=[\\\\/])`),
+    ] as const
   })
 
 function pickVendorChunk(id: string): string | undefined {
@@ -128,7 +137,7 @@ function writePortFile(): Plugin {
         if (addr && typeof addr === "object") {
           fs.writeFileSync(
             path.join(__dirname, "..", "..", ".vite-port"),
-            String(addr.port),
+            String(addr.port)
           )
         }
       })
@@ -153,6 +162,12 @@ export default defineConfig({
       // npm-workspaces without an explicit Vite alias.
       "@": path.resolve(__dirname, "./src"),
     },
+    // `@streamdown/code` depends on shiki 3 and installs its own copy, which
+    // shipped every TextMate grammar a second time (~12 MB of async
+    // chunks). It uses only `createHighlighter`, `bundledLanguages`,
+    // `bundledLanguagesInfo` and the JavaScript regex engine, which the app's
+    // shiki 4 provides unchanged, so both resolve to the one copy.
+    dedupe: ["shiki"],
   },
   optimizeDeps: {
     // Pin dep-scan entries so the scanner doesn't crawl nested HTML files

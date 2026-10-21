@@ -17,10 +17,8 @@ import { cn } from "@/lib/utils"
 import { toFileUrl } from "@/lib/asset-url"
 import { PreviewSelectionOverlay } from "./preview-selection-overlay"
 import { forwardCanvasWheel } from "./canvas-gesture"
-import {
-  INJECT_SCRIPT_WEBVIEW,
-  buildIframeInjectScript,
-} from "./inject-script"
+import { INJECT_SCRIPT_WEBVIEW, buildIframeInjectScript } from "./inject-script"
+import { parsePreviewPageMessage, readIframeEnvelope } from "./preview-messages"
 import type {
   ConsoleLog,
   DomNode,
@@ -28,6 +26,7 @@ import type {
   ElectronWebviewIpcEvent,
   SelectedElement,
 } from "./types"
+import { hasElectronApi } from "@/services/ipc-facade"
 
 /** Imperative surface for hosts (reload, style pushes, page-level zoom …). */
 export interface PreviewViewportHandle {
@@ -65,7 +64,20 @@ interface PreviewViewportProps {
   interactive?: boolean
   selectionMode?: boolean
   onSelectionExit?: () => void
-  onNavigate?: (url: string, history: { back: boolean; forward: boolean }) => void
+  onNavigate?: (
+    url: string,
+    history: { back: boolean; forward: boolean }
+  ) => void
+  /**
+   * The page's title, and its first favicon URL, as the guest reports them.
+   * Webview only; the iframe fallback never reports.
+   */
+  onPageInfo?: (info: { title?: string; favicon?: string | null }) => void
+  /**
+   * The user agent the page should see (a tablet or phone preset), or null
+   * for the guest's own. Webview only; changing it reloads the page.
+   */
+  userAgent?: string | null
   onLoadingChange?: (loading: boolean) => void
   onElementSelected?: (el: SelectedElement) => void
   onDomTree?: (tree: DomNode | null) => void
@@ -75,6 +87,11 @@ interface PreviewViewportProps {
   onShortcut?: (shortcut: string) => void
   /** Canvas owns the transform; guest page zoom stays at 100% in its own session. */
   canvas?: boolean
+  /**
+   * The guest's webContents id once the webview attaches, and null when its
+   * guest is destroyed. Electron only; the iframe fallback never reports.
+   */
+  onGuestChange?: (webContentsId: number | null) => void
 }
 
 export const PreviewViewport = forwardRef<
@@ -88,18 +105,21 @@ export const PreviewViewport = forwardRef<
     selectionMode = false,
     onSelectionExit,
     onNavigate,
+    onPageInfo,
+    userAgent = null,
     onLoadingChange,
     onElementSelected,
     onDomTree,
     onConsoleEntries,
     onShortcut,
     canvas = false,
+    onGuestChange,
   },
   ref
 ) {
   const webviewRef = useRef<ElectronWebviewElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
-  const isElectron = !!window.electronAPI
+  const isElectron = hasElectronApi()
   const electronPreloadPath = window.__BETTERC0DE__?.electronPath
   const webviewPreload = electronPreloadPath
     ? toFileUrl(`${electronPreloadPath}/browser-preview-preload.cjs`)
@@ -122,6 +142,8 @@ export const PreviewViewport = forwardRef<
     onConsoleEntries,
     onShortcut,
     onNavigate,
+    onPageInfo,
+    onGuestChange,
   })
   callbacksRef.current = {
     onLoadingChange,
@@ -130,45 +152,49 @@ export const PreviewViewport = forwardRef<
     onConsoleEntries,
     onShortcut,
     onNavigate,
+    onPageInfo,
+    onGuestChange,
   }
 
-  // Normalize + dispatch bc-* messages from either transport ("bc-" prefixed
-  // via iframe postMessage, bare channel via webview ipc-message).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleBcMessage = useCallback((type: string, data: any) => {
-    const ch = type.startsWith("bc-") ? type.slice(3) : type
+  // The guest's own user agent, read once before a preset replaces it.
+  const userAgentRef = useRef(userAgent)
+  userAgentRef.current = userAgent
+  const defaultUserAgentRef = useRef<string | null>(null)
+  const applyUserAgent = useCallback((wv: ElectronWebviewElement) => {
+    try {
+      if (!wv.getUserAgent || !wv.setUserAgent) return
+      defaultUserAgentRef.current ??= wv.getUserAgent()
+      const target = userAgentRef.current ?? defaultUserAgentRef.current
+      if (!target || wv.getUserAgent() === target) return
+      wv.setUserAgent(target)
+      wv.reload()
+    } catch {
+      // Not attached yet; dom-ready applies it.
+    }
+  }, [])
+  useEffect(() => {
+    if (isElectron && webviewRef.current) applyUserAgent(webviewRef.current)
+  }, [applyUserAgent, isElectron, userAgent])
+
+  // Validate + dispatch bc-* messages from either transport ("bc-" prefixed
+  // via iframe postMessage, bare channel via webview ipc-message). The page
+  // is untrusted: anything that does not parse is dropped here.
+  const handleBcMessage = useCallback((type: string, data: unknown) => {
+    const message = parsePreviewPageMessage(type, data)
+    if (!message) return
     const cbs = callbacksRef.current
-    switch (ch) {
+    switch (message.kind) {
       case "console":
-        cbs.onConsoleEntries?.([
-          { level: data.level, message: data.message, timestamp: new Date() },
-        ])
-        break
-      case "console-batch":
-        cbs.onConsoleEntries?.(
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (data.entries || []).map((e: any) => ({
-            level: e.level,
-            message: e.message,
-            timestamp: new Date(),
-          }))
-        )
+        cbs.onConsoleEntries?.(message.entries)
         break
       case "dom-tree":
-        cbs.onDomTree?.(data.tree || null)
+        cbs.onDomTree?.(message.tree)
         break
       case "element-selected":
-        cbs.onElementSelected?.(data as SelectedElement)
+        cbs.onElementSelected?.(message.element)
         break
-      case "did-keydown":
-        if (
-          (data?.key === "Control" && data.ctrlKey === true) ||
-          (data?.key === "Meta" && data.metaKey === true)
-        ) cbs.onShortcut?.("canvas-zoom-start")
-        else if (
-          data?.key === "Alt" && data.altKey === true &&
-          !data.ctrlKey && !data.metaKey
-        ) cbs.onShortcut?.("canvas-pan-start")
+      case "shortcut":
+        cbs.onShortcut?.(message.shortcut)
         break
     }
   }, [])
@@ -188,8 +214,8 @@ export const PreviewViewport = forwardRef<
         e.origin !== "null"
       )
         return
-      if (e.data?.type?.startsWith("bc-"))
-        handleBcMessage(e.data.type, e.data.data || e.data)
+      const envelope = readIframeEnvelope(e.data as unknown)
+      if (envelope) handleBcMessage(envelope.type, envelope.data)
     }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
@@ -201,15 +227,60 @@ export const PreviewViewport = forwardRef<
     const wv = webviewRef.current
     if (!wv) return
 
+    // Hosts key per-guest buffers by this id; report it once it exists and
+    // retract it when the guest dies, so those buffers can be dropped.
+    let guestId: number | null = null
+    const reportGuest = () => {
+      let id: number | null = null
+      try {
+        const value = wv.getWebContentsId?.()
+        id = typeof value === "number" ? value : null
+      } catch {
+        // Thrown until the webview is attached.
+      }
+      if (id === null || id === guestId) return
+      guestId = id
+      callbacksRef.current.onGuestChange?.(id)
+    }
+    const onDestroyed = () => {
+      if (guestId === null) return
+      guestId = null
+      callbacksRef.current.onGuestChange?.(null)
+    }
+
     const onDomReady = () => {
+      reportGuest()
+      applyUserAgent(wv)
       if (canvas) wv.setZoomFactor(1)
       callbacksRef.current.onLoadingChange?.(false)
       // Inject the inspector script (uses window.cursorBrowser.send exposed by preload)
-      wv.executeJavaScript(INJECT_SCRIPT_WEBVIEW).catch(() => { /* Expected: webview may not be ready for JS injection */ })
+      wv.executeJavaScript(INJECT_SCRIPT_WEBVIEW).catch(() => {
+        /* Expected: webview may not be ready for JS injection */
+      })
     }
     const onNavigation = (event: Event) => {
       const nextUrl = (event as Event & { url?: string }).url
-      if (nextUrl && /^(?:https?|betterc0de-html):\/\//.test(nextUrl)) callbacksRef.current.onNavigate?.(nextUrl, { back: wv.canGoBack(), forward: wv.canGoForward() })
+      if (nextUrl && /^(?:https?|betterc0de-html):\/\//.test(nextUrl))
+        callbacksRef.current.onNavigate?.(nextUrl, {
+          back: wv.canGoBack(),
+          forward: wv.canGoForward(),
+        })
+    }
+
+    const onTitle = (event: Event) => {
+      const title = (event as Event & { title?: unknown }).title
+      if (typeof title === "string")
+        callbacksRef.current.onPageInfo?.({ title })
+    }
+    const onFavicon = (event: Event) => {
+      const favicons = (event as Event & { favicons?: unknown }).favicons
+      const first = Array.isArray(favicons)
+        ? favicons.find(
+            (entry): entry is string =>
+              typeof entry === "string" && entry.startsWith("https://")
+          )
+        : undefined
+      callbacksRef.current.onPageInfo?.({ favicon: first ?? null })
     }
 
     const onIpcMessage = ((e: ElectronWebviewIpcEvent) => {
@@ -225,18 +296,26 @@ export const PreviewViewport = forwardRef<
       if (e.channel) handleBcMessage(e.channel, e.args?.[0])
     }) as unknown as EventListener
 
+    wv.addEventListener("did-attach", reportGuest)
+    wv.addEventListener("destroyed", onDestroyed)
     wv.addEventListener("dom-ready", onDomReady)
     wv.addEventListener("ipc-message", onIpcMessage)
     wv.addEventListener("did-navigate", onNavigation)
     wv.addEventListener("did-navigate-in-page", onNavigation)
+    wv.addEventListener("page-title-updated", onTitle)
+    wv.addEventListener("page-favicon-updated", onFavicon)
 
     return () => {
+      wv.removeEventListener("did-attach", reportGuest)
+      wv.removeEventListener("destroyed", onDestroyed)
       wv.removeEventListener("dom-ready", onDomReady)
       wv.removeEventListener("ipc-message", onIpcMessage)
       wv.removeEventListener("did-navigate", onNavigation)
       wv.removeEventListener("did-navigate-in-page", onNavigation)
+      wv.removeEventListener("page-title-updated", onTitle)
+      wv.removeEventListener("page-favicon-updated", onFavicon)
     }
-  }, [isElectron, handleBcMessage, canvas])
+  }, [isElectron, handleBcMessage, canvas, applyUserAgent])
 
   // iframe fallback injection
   const handleIframeLoad = useCallback(() => {
@@ -258,7 +337,9 @@ export const PreviewViewport = forwardRef<
       if (isElectron && webviewRef.current) {
         webviewRef.current
           .executeJavaScript(`window.postMessage(${JSON.stringify(msg)}, '*')`)
-          .catch(() => { /* Expected: webview may have navigated away */ })
+          .catch(() => {
+            /* Expected: webview may have navigated away */
+          })
         return
       }
       iframeRef.current?.contentWindow?.postMessage(msg, iframeTargetOrigin)
@@ -267,7 +348,11 @@ export const PreviewViewport = forwardRef<
   )
 
   const execute = useCallback(async (code: string) => {
-    try { return await webviewRef.current?.executeJavaScript(code) } catch { return undefined }
+    try {
+      return await webviewRef.current?.executeJavaScript(code)
+    } catch {
+      return undefined
+    }
   }, [])
 
   useImperativeHandle(
@@ -345,7 +430,9 @@ export const PreviewViewport = forwardRef<
           style={{ display: "inline-flex" }}
           preload={webviewPreload || undefined}
           partition={
-            canvas ? "betterc0de-canvas-preview" : window.__BETTERC0DE__?.previewPartition || "betterc0de-preview"
+            canvas
+              ? "betterc0de-canvas-preview"
+              : window.__BETTERC0DE__?.previewPartition || "betterc0de-preview"
           }
         />
       ) : (
@@ -373,11 +460,13 @@ export const PreviewViewport = forwardRef<
           onLoad={handleIframeLoad}
         />
       )}
-      {isElectron && selectionMode && <PreviewSelectionOverlay
-        execute={execute}
-        onSelect={onElementSelected}
-        onExit={onSelectionExit}
-      />}
+      {isElectron && selectionMode && (
+        <PreviewSelectionOverlay
+          execute={execute}
+          onSelect={onElementSelected}
+          onExit={onSelectionExit}
+        />
+      )}
     </div>
   )
 })

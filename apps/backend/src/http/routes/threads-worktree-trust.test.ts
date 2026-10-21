@@ -4,7 +4,16 @@ import path from "node:path"
 import { Hono } from "hono"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AppState } from "../../appState"
-import { registerThreadsRoutes } from "./threads"
+import { ThreadTurnCoordinator } from "../../provider/threadTurnCoordinator"
+import { inertOrchestrator } from "../../testUtils/routing-services"
+import { registerThreadsRoutes as registerThreadsRoutesUnfilled } from "./threads"
+import { withInertStateArgument } from "../../testUtils/inert-app-state"
+
+// Doubles name only what a test exercises; the rest is filled in inert.
+const registerThreadsRoutes = withInertStateArgument(
+  registerThreadsRoutesUnfilled,
+  1
+)
 
 const cleanupDirectories: string[] = []
 
@@ -19,7 +28,11 @@ describe("thread worktree trust boundary", () => {
     const baseRepoPath = await temporaryDirectory("boolean-base")
     const worktreePath = await temporaryDirectory("boolean-worktree")
     const assertWorkspaceTrusted = vi.fn()
-    const { app, removeForThread, resetForThread } = worktreeApp({ baseRepoPath, worktreePath, assertWorkspaceTrusted })
+    const { app, removeForThread, resetForThread } = worktreeApp({
+      baseRepoPath,
+      worktreePath,
+      assertWorkspaceTrusted,
+    })
     for (const [route, body] of [
       ["/threads/thread-1/worktree/remove", { deleteBranch: "false" }],
       ["/threads/thread-1/worktree/remove", { force: "false" }],
@@ -186,8 +199,16 @@ function worktreeApp(input: {
     baseBranch: entry.base_branch,
     headSha: null,
   }))
+  const passthroughTeardown = async (
+    _threadId: string,
+    operation: () => Promise<unknown>
+  ) => operation()
   const app = new Hono()
   registerThreadsRoutes(app, {
+    orchestrator: inertOrchestrator(),
+    threadTurnCoordinator: new ThreadTurnCoordinator(),
+    providerHub: { withThreadTeardown: passthroughTeardown },
+    providers: { withThreadTeardown: passthroughTeardown },
     projectProjections: {
       listAll: () => [{ path: input.baseRepoPath }],
     },

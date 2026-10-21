@@ -13,7 +13,10 @@ describe("SettingsService secret contract", () => {
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "betterc0de-settings-"))
     filePath = path.join(dir, "settings.json")
-    vi.stubEnv("BETTERC0DE_SETTINGS_KEY", Buffer.alloc(32, 7).toString("base64"))
+    vi.stubEnv(
+      "BETTERC0DE_SETTINGS_KEY",
+      Buffer.alloc(32, 7).toString("base64")
+    )
     __resetMasterKeyCache()
   })
 
@@ -31,18 +34,12 @@ describe("SettingsService secret contract", () => {
         openai: { api_key: { set: "sk-openai" } },
         betterc0de: { serverPassword: { set: "provider-password" } },
       },
-      mcp_servers: [{
-        id: "github",
-        name: "GitHub",
-        command: "npx",
-        args: "",
-        envVars: { set: "GITHUB_TOKEN=mcp-token" },
-        enabled: true,
-      }],
       provider_instances: {
         remote: {
           driver: "betterc0de",
-          environment: [{ name: "REMOTE_TOKEN", value: "env-token", sensitive: true }],
+          environment: [
+            { name: "REMOTE_TOKEN", value: "env-token", sensitive: true },
+          ],
           config: { serverPassword: { set: "instance-password" } },
         },
       },
@@ -56,15 +53,16 @@ describe("SettingsService secret contract", () => {
           serverPassword: { configured: true, storage: "encrypted" },
         },
       },
-      mcp_servers: [{ envVars: { configured: true, storage: "encrypted" } }],
       provider_instances: {
         remote: {
-          environment: [{
-            name: "REMOTE_TOKEN",
-            value: "",
-            valueRedacted: true,
-            secretState: { configured: true, storage: "encrypted" },
-          }],
+          environment: [
+            {
+              name: "REMOTE_TOKEN",
+              value: "",
+              valueRedacted: true,
+              secretState: { configured: true, storage: "encrypted" },
+            },
+          ],
           config: {
             serverPassword: { configured: true, storage: "encrypted" },
           },
@@ -76,7 +74,6 @@ describe("SettingsService secret contract", () => {
     for (const secret of [
       "sk-openai",
       "provider-password",
-      "mcp-token",
       "env-token",
       "instance-password",
       "deepgram-key",
@@ -88,10 +85,9 @@ describe("SettingsService secret contract", () => {
     if (process.platform !== "win32") {
       expect(fs.statSync(filePath).mode & 0o777).toBe(0o600)
     }
-    expect(disk.match(/enc:v1:/g)?.length).toBe(6)
+    expect(disk.match(/enc:v1:/g)?.length).toBe(5)
     expect(disk).not.toContain("sk-openai")
     expect(disk).not.toContain("provider-password")
-    expect(disk).not.toContain("mcp-token")
     expect(disk).not.toContain("env-token")
     expect(disk).not.toContain("instance-password")
     expect(disk).not.toContain("deepgram-key")
@@ -111,7 +107,9 @@ describe("SettingsService secret contract", () => {
       voice_language: "de",
     })
     expect(JSON.stringify(response)).not.toContain("synthetic-deepgram-key")
-    expect(fs.readFileSync(filePath, "utf8")).not.toContain("synthetic-deepgram-key")
+    expect(fs.readFileSync(filePath, "utf8")).not.toContain(
+      "synthetic-deepgram-key"
+    )
 
     const reopened = new SettingsService(filePath)
     expect(reopened.get()).toMatchObject({
@@ -133,8 +131,14 @@ describe("SettingsService secret contract", () => {
     const service = new SettingsService(filePath)
     expect(service.get().jev_search_enabled).toBe(false)
     expect(service.getPublic().jev_api_key).toBeUndefined()
-    const response = service.updatePublic({ jev_search_enabled: true, jev_api_key: { set: "jev-private-key" } })
-    expect(response).toMatchObject({ jev_search_enabled: true, jev_api_key: { configured: true, storage: "encrypted" } })
+    const response = service.updatePublic({
+      jev_search_enabled: true,
+      jev_api_key: { set: "jev-private-key" },
+    })
+    expect(response).toMatchObject({
+      jev_search_enabled: true,
+      jev_api_key: { configured: true, storage: "encrypted" },
+    })
     expect(JSON.stringify(response)).not.toContain("jev-private-key")
     expect(fs.readFileSync(filePath, "utf8")).not.toContain("jev-private-key")
     const reopened = new SettingsService(filePath)
@@ -142,7 +146,9 @@ describe("SettingsService secret contract", () => {
     reopened.updatePublic({ jev_search_enabled: false })
     expect(reopened.get().jev_api_key).toBe("jev-private-key")
     reopened.updatePublic({ jev_api_key: { clear: true } })
-    expect(reopened.getPublic().jev_api_key).toMatchObject({ configured: false })
+    expect(reopened.getPublic().jev_api_key).toMatchObject({
+      configured: false,
+    })
   })
 
   it("rejects undeclared root settings instead of persisting or returning unknown secrets", () => {
@@ -162,7 +168,7 @@ describe("SettingsService secret contract", () => {
     )
 
     expect(JSON.stringify(service.getPublic())).not.toContain(
-      "must-not-be-accepted",
+      "must-not-be-accepted"
     )
     expect(fs.existsSync(filePath)).toBe(false)
   })
@@ -204,7 +210,9 @@ describe("SettingsService secret contract", () => {
 
   it("round-trips a redacted response without clearing stored secrets", () => {
     const service = new SettingsService(filePath)
-    service.updatePublic({ providers: { openai: { api_key: { set: "sk-keep" } } } })
+    service.updatePublic({
+      providers: { openai: { api_key: { set: "sk-keep" } } },
+    })
 
     const publicSettings = service.getPublic()
     service.updatePublic({
@@ -258,12 +266,12 @@ describe("SettingsService secret contract", () => {
         code: "invalid_settings_patch",
       })
     )
-    expect(service.get().provider_instances.remote.environment[0]).toMatchObject(
-      {
-        sensitive: true,
-        value: "keep-secret",
-      }
-    )
+    expect(
+      service.get().provider_instances.remote.environment[0]
+    ).toMatchObject({
+      sensitive: true,
+      value: "keep-secret",
+    })
     expect(JSON.stringify(service.getPublic())).not.toContain("keep-secret")
 
     service.updatePublic({
@@ -280,12 +288,12 @@ describe("SettingsService secret contract", () => {
         },
       },
     })
-    expect(service.get().provider_instances.remote.environment[0]).toMatchObject(
-      {
-        sensitive: true,
-        value: "",
-      }
-    )
+    expect(
+      service.get().provider_instances.remote.environment[0]
+    ).toMatchObject({
+      sensitive: true,
+      value: "",
+    })
   })
 
   it("auto-classifies and protects secret-like provider fields", () => {
@@ -371,9 +379,7 @@ describe("SettingsService secret contract", () => {
       provider_instances: {
         remove_me: {
           driver: "betterc0de",
-          environment: [
-            { name: "REMOTE_TOKEN", value: "delete-this-secret" },
-          ],
+          environment: [{ name: "REMOTE_TOKEN", value: "delete-this-secret" }],
         },
         keep_me: {
           driver: "codex",
@@ -421,10 +427,24 @@ describe("SettingsService secret contract", () => {
     expect(fs.readFileSync(filePath, "utf8")).not.toContain("shared-secret")
   })
 
-  it("does not auto-trust workspaces when a present settings file cannot be applied", () => {
-    expect(new SettingsService(filePath).get().auto_trust_workspaces).toBe(true)
+  it("does not auto-trust workspaces by default or when a present settings file cannot be applied", () => {
+    // Opening a folder is not consent to run what it declares.
+    expect(new SettingsService(filePath).get().auto_trust_workspaces).toBe(
+      false
+    )
     fs.writeFileSync(filePath, "{ definitely not valid JSON", "utf8")
-    expect(new SettingsService(filePath).get().auto_trust_workspaces).toBe(false)
+    expect(new SettingsService(filePath).get().auto_trust_workspaces).toBe(
+      false
+    )
+  })
+
+  it("keeps a stored auto-trust choice", () => {
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({ auto_trust_workspaces: true }),
+      "utf8"
+    )
+    expect(new SettingsService(filePath).get().auto_trust_workspaces).toBe(true)
   })
 
   it("preserves malformed settings bytes and blocks writes until repaired", () => {
@@ -447,11 +467,15 @@ describe("SettingsService secret contract", () => {
   })
 
   it("preserves a settings file when its metadata cannot be read", () => {
-    const bytes = JSON.stringify({ theme: "light", custom_rules: "Keep these rules" })
+    const bytes = JSON.stringify({
+      theme: "light",
+      custom_rules: "Keep these rules",
+    })
     fs.writeFileSync(filePath, bytes)
     const nativeStat = fs.statSync
     const stat = vi.spyOn(fs, "statSync").mockImplementation((...args) => {
-      if (args[0] === filePath) throw Object.assign(new Error("metadata denied"), { code: "EACCES" })
+      if (args[0] === filePath)
+        throw Object.assign(new Error("metadata denied"), { code: "EACCES" })
       return Reflect.apply(nativeStat, fs, args)
     })
     let service: SettingsService
@@ -472,15 +496,20 @@ describe("SettingsService secret contract", () => {
     const before = fs.readFileSync(filePath, "utf8")
     const nativeOpen = fs.openSync
     let occupiedPath = ""
-    const open = vi.spyOn(fs, "openSync").mockImplementation((target, flags, mode) => {
-      if (String(target).endsWith(".tmp")) {
-        occupiedPath = String(target)
-        const fd = nativeOpen(target, "wx", 0o600)
-        try { fs.writeFileSync(fd, "another owner's file") }
-        finally { fs.closeSync(fd) }
-      }
-      return nativeOpen(target, flags, mode)
-    })
+    const open = vi
+      .spyOn(fs, "openSync")
+      .mockImplementation((target, flags, mode) => {
+        if (String(target).endsWith(".tmp")) {
+          occupiedPath = String(target)
+          const fd = nativeOpen(target, "wx", 0o600)
+          try {
+            fs.writeFileSync(fd, "another owner's file")
+          } finally {
+            fs.closeSync(fd)
+          }
+        }
+        return nativeOpen(target, flags, mode)
+      })
     try {
       expect(() => service.update({ theme: "dark" })).toThrow(/EEXIST/)
       expect(fs.readFileSync(occupiedPath, "utf8")).toBe("another owner's file")
@@ -496,17 +525,28 @@ describe("SettingsService secret contract", () => {
     original.updatePublic({
       theme: "light",
       language: "de",
-      custom_rules: "Keep my project rules",
       archived_thread_ids: ["saved-chat"],
       providers: {
-        openai: { api_key: { set: "keep-encrypted-key" }, base_url: "https://example.test/v1" },
+        openai: {
+          api_key: { set: "keep-encrypted-key" },
+          base_url: "https://example.test/v1",
+        },
         claude: { enabled: false, custom_models: ["custom-model"] },
       },
     })
     const legacy = JSON.parse(fs.readFileSync(filePath, "utf8"))
+    // A key an older version kept (now in rules.md) still loads.
+    legacy.custom_rules = "Keep my project rules"
     legacy.text_generation_model = null
     legacy.deepgram_api_key = null
-    for (const name of ["anthropic", "google", "grok", "openrouter", "deepseek", "lmstudio"]) {
+    for (const name of [
+      "anthropic",
+      "google",
+      "grok",
+      "openrouter",
+      "deepseek",
+      "lmstudio",
+    ]) {
       legacy.providers[name].api_key = null
       legacy.providers[name].base_url = null
     }
@@ -516,10 +556,15 @@ describe("SettingsService secret contract", () => {
 
     const migrated = new SettingsService(filePath)
     expect(migrated.get()).toMatchObject({
-      theme: "light", language: "de", custom_rules: "Keep my project rules",
+      theme: "light",
+      language: "de",
+      custom_rules: "Keep my project rules",
       archived_thread_ids: ["saved-chat"],
       providers: {
-        openai: { api_key: "keep-encrypted-key", base_url: "https://example.test/v1" },
+        openai: {
+          api_key: "keep-encrypted-key",
+          base_url: "https://example.test/v1",
+        },
         claude: { enabled: false, custom_models: ["custom-model"] },
       },
     })
@@ -527,7 +572,11 @@ describe("SettingsService secret contract", () => {
     expect(migrated.get().providers.anthropic.api_key).toBeUndefined()
     expect(fs.readFileSync(filePath, "utf8")).toBe(legacyBytes)
     const saved = migrated.updatePublic({ show_tool_details: true })
-    expect(httpContracts.updateSettings.response.safeParse(JSON.parse(JSON.stringify(saved))).success).toBe(true)
+    expect(
+      httpContracts.updateSettings.response.safeParse(
+        JSON.parse(JSON.stringify(saved))
+      ).success
+    ).toBe(true)
     expect(saved).toMatchObject({ language: "de", show_tool_details: true })
     expect(JSON.stringify(saved)).not.toContain("keep-encrypted-key")
     const disk = fs.readFileSync(filePath, "utf8")
@@ -538,16 +587,38 @@ describe("SettingsService secret contract", () => {
   })
 
   it("accepts an all-null legacy provider configuration like the console report", () => {
-    fs.writeFileSync(filePath, JSON.stringify({
-      text_generation_model: null,
-      providers: Object.fromEntries(["openai", "anthropic", "google", "grok", "openrouter", "deepseek", "lmstudio"]
-        .map(name => [name, { api_key: null, base_url: null }])),
-    }))
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        text_generation_model: null,
+        providers: Object.fromEntries(
+          [
+            "openai",
+            "anthropic",
+            "google",
+            "grok",
+            "openrouter",
+            "deepseek",
+            "lmstudio",
+          ].map((name) => [name, { api_key: null, base_url: null }])
+        ),
+      })
+    )
     const service = new SettingsService(filePath)
-    expect(service.updatePublic({ language: "de" })).toMatchObject({ language: "de" })
-    expect(service.get().text_generation_model_selection.instanceId).toBe("codex")
-    expect(service.getPublic()).toMatchObject({ providers: { openai: { api_key: { configured: false } } } })
-    expect(httpContracts.getSettings.response.safeParse(JSON.parse(JSON.stringify(service.getPublic()))).success).toBe(true)
+    expect(service.updatePublic({ language: "de" })).toMatchObject({
+      language: "de",
+    })
+    expect(service.get().text_generation_model_selection.instanceId).toBe(
+      "codex"
+    )
+    expect(service.getPublic()).toMatchObject({
+      providers: { openai: { api_key: { configured: false } } },
+    })
+    expect(
+      httpContracts.getSettings.response.safeParse(
+        JSON.parse(JSON.stringify(service.getPublic()))
+      ).success
+    ).toBe(true)
   })
 
   it.each([
@@ -555,13 +626,18 @@ describe("SettingsService secret contract", () => {
     { providers: { openai: { enabled: null } } },
     { providers: { openai: { api_key: 42 } } },
     { providers: { openai: { base_url: [] } } },
-  ])("still protects invalid settings from being overwritten: %j", invalid => {
-    const bytes = JSON.stringify({ text_generation_model: null, ...invalid })
-    fs.writeFileSync(filePath, bytes)
-    const service = new SettingsService(filePath)
-    expect(() => service.updatePublic({ theme: "light" })).toThrowError(expect.objectContaining({ code: "invalid_settings_patch" }))
-    expect(fs.readFileSync(filePath, "utf8")).toBe(bytes)
-  })
+  ])(
+    "still protects invalid settings from being overwritten: %j",
+    (invalid) => {
+      const bytes = JSON.stringify({ text_generation_model: null, ...invalid })
+      fs.writeFileSync(filePath, bytes)
+      const service = new SettingsService(filePath)
+      expect(() => service.updatePublic({ theme: "light" })).toThrowError(
+        expect.objectContaining({ code: "invalid_settings_patch" })
+      )
+      expect(fs.readFileSync(filePath, "utf8")).toBe(bytes)
+    }
+  )
 
   it("does not overwrite schema-invalid settings containing credentials", () => {
     const invalid = JSON.stringify({
@@ -569,9 +645,7 @@ describe("SettingsService secret contract", () => {
       provider_instances: {
         remote: {
           driver: "betterc0de",
-          environment: [
-            { name: "REMOTE_TOKEN", value: "recover-this-secret" },
-          ],
+          environment: [{ name: "REMOTE_TOKEN", value: "recover-this-secret" }],
         },
       },
     })
@@ -675,54 +749,70 @@ describe("SettingsService secret contract", () => {
     })
   })
 
-  it("does not carry MCP environment secrets across command or identity changes", () => {
+  it("refuses to store the desktop configuration keys that moved to their files", () => {
     const service = new SettingsService(filePath)
-    service.updatePublic({
-      mcp_servers: [{
-        id: "github",
-        name: "GitHub",
-        command: "trusted-mcp",
-        args: "--stdio",
-        envVars: { set: "GITHUB_TOKEN=bound-secret" },
-        enabled: true,
-      }],
-    })
+    for (const patch of [
+      { custom_rules: "rules" },
+      { skills: [] },
+      { hooks: [] },
+      {
+        mcp_servers: [
+          {
+            id: "github",
+            name: "GitHub",
+            command: "trusted-mcp",
+            args: "--stdio",
+            envVars: { set: "GITHUB_TOKEN=bound-secret" },
+            enabled: true,
+          },
+        ],
+      },
+    ]) {
+      expect(() => service.updatePublic(patch)).toThrowError(
+        expect.objectContaining<Partial<InvalidSettingsPatchError>>({
+          statusCode: 400,
+          code: "invalid_settings_patch",
+        })
+      )
+    }
+    expect(fs.existsSync(filePath)).toBe(false)
+  })
 
-    const [publicServer] = service.getPublic().mcp_servers as Array<Record<string, unknown>>
-    expect(() =>
-      service.updatePublic({
-        mcp_servers: [{
-          ...publicServer,
-          command: "replacement-mcp",
-        }],
-      })
-    ).toThrowError(
-      expect.objectContaining<Partial<InvalidSettingsPatchError>>({
-        statusCode: 400,
-        code: "invalid_settings_patch",
+  it("keeps legacy MCP envVars encrypted until the migration removes them", () => {
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        theme: "light",
+        mcp_servers: [
+          {
+            id: "github",
+            name: "GitHub",
+            command: "trusted-mcp",
+            args: "--stdio",
+            envVars: "GITHUB_TOKEN=bound-secret",
+            enabled: true,
+          },
+        ],
       })
     )
-    expect(service.get().mcp_servers[0]).toMatchObject({
+    const service = new SettingsService(filePath)
+    // Plaintext from an older version is encrypted on load, and read back.
+    expect(fs.readFileSync(filePath, "utf8")).not.toContain("bound-secret")
+    expect(service.get().mcp_servers?.[0]).toMatchObject({
       id: "github",
-      command: "trusted-mcp",
       envVars: "GITHUB_TOKEN=bound-secret",
     })
+    expect(
+      (service.getPublic().mcp_servers as Array<Record<string, unknown>>)[0]
+    ).toMatchObject({ envVars: { configured: true, storage: "encrypted" } })
 
-    service.updatePublic({
-      mcp_servers: [{
-        id: "replacement",
-        name: "Replacement",
-        command: "replacement-mcp",
-        args: "--stdio",
-        envVars: "",
-        enabled: true,
-      }],
-    })
-    expect(service.get().mcp_servers[0]).toMatchObject({
-      id: "replacement",
-      command: "replacement-mcp",
-      envVars: "",
-    })
+    // The migration removes the key once the servers are in their file.
+    service.update({ mcp_servers: undefined })
+    expect(service.get().mcp_servers).toBeUndefined()
+    expect(JSON.parse(fs.readFileSync(filePath, "utf8"))).not.toHaveProperty(
+      "mcp_servers"
+    )
+    expect(new SettingsService(filePath).get().theme).toBe("light")
   })
 
   it("requires instance credentials to be cleared before changing driver destinations", () => {
@@ -740,7 +830,10 @@ describe("SettingsService secret contract", () => {
     })
 
     const remote = (
-      service.getPublic().provider_instances as Record<string, Record<string, unknown>>
+      service.getPublic().provider_instances as Record<
+        string,
+        Record<string, unknown>
+      >
     ).remote
     expect(() =>
       service.updatePublic({
@@ -770,7 +863,11 @@ describe("SettingsService secret contract", () => {
           driver: "claude",
           displayName: "Primary",
           environment: [
-            { name: "ANTHROPIC_API_KEY", value: "primary-secret", sensitive: true },
+            {
+              name: "ANTHROPIC_API_KEY",
+              value: "primary-secret",
+              sensitive: true,
+            },
           ],
           config: {
             homePath: "/trusted/claude-home",
@@ -800,7 +897,11 @@ describe("SettingsService secret contract", () => {
         driver: "claude",
         displayName: "Renamed Primary",
         environment: [
-          { name: "ANTHROPIC_API_KEY", value: "primary-secret", sensitive: true },
+          {
+            name: "ANTHROPIC_API_KEY",
+            value: "primary-secret",
+            sensitive: true,
+          },
         ],
         config: {
           homePath: "/trusted/claude-home",
@@ -821,7 +922,9 @@ describe("SettingsService secret contract", () => {
       homePath: "/trusted/claude-home",
       apiKey: "primary-config-secret",
     })
-    expect(reloaded.get().provider_instances.secondary.displayName).toBe("Secondary")
+    expect(reloaded.get().provider_instances.secondary.displayName).toBe(
+      "Secondary"
+    )
   })
 
   it.each(["homePath", "shadowHomePath"])(
@@ -833,7 +936,11 @@ describe("SettingsService secret contract", () => {
           guarded: {
             driver: "claude",
             environment: [
-              { name: "ANTHROPIC_API_KEY", value: "bound-secret", sensitive: true },
+              {
+                name: "ANTHROPIC_API_KEY",
+                value: "bound-secret",
+                sensitive: true,
+              },
             ],
             config: { [destinationKey]: "/trusted/home" },
           },
@@ -848,7 +955,9 @@ describe("SettingsService secret contract", () => {
             },
           },
         })
-      ).toThrowError(expect.objectContaining({ code: "invalid_settings_patch" }))
+      ).toThrowError(
+        expect.objectContaining({ code: "invalid_settings_patch" })
+      )
 
       expect(service.get().provider_instances.guarded.config).toMatchObject({
         [destinationKey]: "/trusted/home",
@@ -869,7 +978,10 @@ describe("SettingsService secret contract", () => {
       },
     })
     const remote = (
-      service.getPublic().provider_instances as Record<string, Record<string, unknown>>
+      service.getPublic().provider_instances as Record<
+        string,
+        Record<string, unknown>
+      >
     ).remote
     const environment = remote.environment as Array<Record<string, unknown>>
 
@@ -880,7 +992,11 @@ describe("SettingsService secret contract", () => {
             ...remote,
             environment: [
               ...environment,
-              { name: "HTTPS_PROXY", value: "https://attacker.example", sensitive: false },
+              {
+                name: "HTTPS_PROXY",
+                value: "https://attacker.example",
+                sensitive: false,
+              },
             ],
           },
         },
@@ -892,9 +1008,7 @@ describe("SettingsService secret contract", () => {
         provider_instances: {
           remote: {
             ...remote,
-            environment: [
-              { ...environment[0], name: "RENAMED_TOKEN" },
-            ],
+            environment: [{ ...environment[0], name: "RENAMED_TOKEN" }],
           },
         },
       })
@@ -905,15 +1019,27 @@ describe("SettingsService secret contract", () => {
         remote: {
           ...remote,
           environment: [
-            { name: "REMOTE_TOKEN", value: { set: "rebound-secret" }, sensitive: true },
-            { name: "HTTPS_PROXY", value: "https://approved.example", sensitive: false },
+            {
+              name: "REMOTE_TOKEN",
+              value: { set: "rebound-secret" },
+              sensitive: true,
+            },
+            {
+              name: "HTTPS_PROXY",
+              value: "https://approved.example",
+              sensitive: false,
+            },
           ],
         },
       },
     })
     expect(service.get().provider_instances.remote.environment).toEqual([
       { name: "REMOTE_TOKEN", value: "rebound-secret", sensitive: true },
-      { name: "HTTPS_PROXY", value: "https://approved.example", sensitive: false },
+      {
+        name: "HTTPS_PROXY",
+        value: "https://approved.example",
+        sensitive: false,
+      },
     ])
   })
 
@@ -925,7 +1051,11 @@ describe("SettingsService secret contract", () => {
           unsafe: {
             driver: "codex",
             environment: [
-              { name: "NODE_OPTIONS", value: "--require ./steal.js", sensitive: false },
+              {
+                name: "NODE_OPTIONS",
+                value: "--require ./steal.js",
+                sensitive: false,
+              },
             ],
           },
         },
@@ -940,10 +1070,36 @@ describe("SettingsService secret contract", () => {
       expect.objectContaining<Partial<InvalidSettingsPatchError>>({
         statusCode: 400,
         code: "invalid_settings_patch",
-      }),
+      })
     )
     expect(service.get().theme).toBe("dark")
     expect(fs.existsSync(filePath)).toBe(false)
+  })
+
+  it("persists configured helper models and rejects an invalid model id", () => {
+    const service = new SettingsService(filePath)
+
+    service.update({
+      image_generation_model: "gpt-image-3",
+      commit_message_claude_model: "claude-haiku-5",
+    })
+    const reloaded = new SettingsService(filePath).get()
+    expect(reloaded.image_generation_model).toBe("gpt-image-3")
+    expect(reloaded.commit_message_claude_model).toBe("claude-haiku-5")
+    expect(reloaded.commit_message_codex_model).toBe("gpt-5.6-luna")
+
+    expect(() =>
+      service.update({ image_generation_model: "gpt-5.5 & calc" })
+    ).toThrowError(
+      expect.objectContaining<Partial<InvalidSettingsPatchError>>({
+        statusCode: 400,
+        code: "invalid_settings_patch",
+      })
+    )
+    expect(service.get().image_generation_model).toBe("gpt-image-3")
+
+    service.update({ image_generation_model: "" })
+    expect(service.get().image_generation_model).toBe("gpt-5.5")
   })
 
   it("keeps encrypted secrets on disk and blocks writes when the master key cannot decrypt them", () => {
@@ -956,7 +1112,10 @@ describe("SettingsService secret contract", () => {
     expect(encryptedFile).toContain("enc:v1:")
     expect(encryptedFile).not.toContain("survives-key-loss")
 
-    vi.stubEnv("BETTERC0DE_SETTINGS_KEY", Buffer.alloc(32, 9).toString("base64"))
+    vi.stubEnv(
+      "BETTERC0DE_SETTINGS_KEY",
+      Buffer.alloc(32, 9).toString("base64")
+    )
     __resetMasterKeyCache()
     const locked = new SettingsService(filePath)
 
@@ -983,7 +1142,9 @@ describe("SettingsService secret contract", () => {
   it("isolates change-listener failures after a successful persistence", () => {
     const service = new SettingsService(filePath)
     const laterListener = vi.fn()
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined)
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined)
     service.on("change", () => {
       throw new Error("listener failed")
     })
@@ -1005,7 +1166,10 @@ describe("SettingsService request-path costs", () => {
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "betterc0de-settings-cost-"))
     filePath = path.join(dir, "settings.json")
-    vi.stubEnv("BETTERC0DE_SETTINGS_KEY", Buffer.alloc(32, 7).toString("base64"))
+    vi.stubEnv(
+      "BETTERC0DE_SETTINGS_KEY",
+      Buffer.alloc(32, 7).toString("base64")
+    )
     __resetMasterKeyCache()
   })
 
@@ -1034,7 +1198,10 @@ describe("SettingsService request-path costs", () => {
 
     // Simulate another process editing settings.json: different content
     // (size) and a newer mtime, which is what the stamp compares.
-    const onDisk = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>
+    const onDisk = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<
+      string,
+      unknown
+    >
     onDisk.custom_rules = "always answer in haiku"
     fs.writeFileSync(filePath, JSON.stringify(onDisk, null, 2), "utf8")
     const later = Date.now() / 1000 + 5

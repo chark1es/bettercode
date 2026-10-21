@@ -115,10 +115,7 @@ export function existingDurableChatDispatch(
   providerKind: string,
   providerInstanceId: string | null
 ): ChatDispatchRecord | null {
-  if (
-    !autoSaveConversationsEnabled(state) ||
-    !body.user_message_id
-  ) {
+  if (!autoSaveConversationsEnabled(state) || !body.user_message_id) {
     return null
   }
   const existing = state.chatDispatches.get(body.user_message_id)
@@ -204,7 +201,7 @@ function taintDispatchDurability(
   origin: string
 ): void {
   const normalized = error instanceof Error ? error : new Error(String(error))
-  state.taintBackend?.(normalized, origin)
+  state.taintBackend(normalized, origin)
 }
 
 export function markAcceptedDispatchMessage(

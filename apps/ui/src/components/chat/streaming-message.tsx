@@ -124,7 +124,13 @@ function StreamingMessageInner({
   )
   return (
     <Message from="assistant">
-      <MessageContent className={compact ? "text-xs" : undefined}>
+      <MessageContent
+        className={
+          compact
+            ? "text-[length:calc(var(--message-font-size)_-_1px)]"
+            : undefined
+        }
+      >
         {showThinking && (reasoning.text || isReasoning) && (
           <Reasoning
             data-slot="turn-reasoning"
@@ -170,7 +176,10 @@ function StreamingMessageInner({
         ) : streamingText ? (
           <>
             {streamingDiffs.length > 0 && (
-              <ChatFileChanges diffs={streamingDiffs} workspaceRoot={workspaceRoot} />
+              <ChatFileChanges
+                diffs={streamingDiffs}
+                workspaceRoot={workspaceRoot}
+              />
             )}
             {streamingTasks.length > 0 && (
               <Queue className="mb-3">
@@ -209,12 +218,16 @@ function StreamingMessageInner({
             <MessageResponse
               concealCodeBlocks={concealCodeBlocks}
               workspaceRoot={workspaceRoot}
+              streaming
             >
               {streamingText}
             </MessageResponse>
           </>
         ) : !reasoning.text && !isReasoning && streamingTools.length === 0 ? (
-          <AgentActivity state="breathing" label={shimmerPhase >= 2 ? "Still working..." : "Thinking..."} />
+          <AgentActivity
+            state="breathing"
+            label={shimmerPhase >= 2 ? "Still working..." : "Thinking..."}
+          />
         ) : null}
       </MessageContent>
     </Message>

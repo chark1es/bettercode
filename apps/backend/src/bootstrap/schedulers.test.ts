@@ -1,6 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest"
 import { incrementalVacuum } from "../persistence/db"
-import type { BootRoot, PersistenceContext, ProvidersContext, SettingsContext } from "./context"
+import type {
+  BootRoot,
+  PersistenceContext,
+  ProvidersContext,
+  SettingsContext,
+} from "./context"
 import { startTimers } from "./schedulers"
 
 vi.mock("../persistence/db", () => ({ incrementalVacuum: vi.fn() }))
@@ -18,8 +23,11 @@ it("does not turn a 30-day vacuum cadence into Node's overflowing 1ms timer", as
   const timers = startTimers(
     { startupCleanup: cleanup } as BootRoot,
     {} as PersistenceContext,
-    { transcriptRecoveryStore: { replay: vi.fn() } } as unknown as SettingsContext,
-    {} as ProvidersContext
+    {
+      transcriptRecoveryStore: { replay: vi.fn() },
+    } as unknown as SettingsContext,
+    // No runtime home: the automations scheduler starts nothing.
+    { state: { config: {} } } as unknown as ProvidersContext
   )
   expect(timers.vacuumTimer).not.toBeNull()
   await new Promise((resolve) => setTimeout(resolve, 50))

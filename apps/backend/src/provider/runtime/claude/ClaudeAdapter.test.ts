@@ -5,8 +5,13 @@ import { describe, expect, it, vi, beforeEach } from "vitest"
 import type { ProviderRuntimeEvent, ThreadId } from "../contracts"
 import {
   ClaudeAdapter,
+  buildClaudeProviderModel,
   buildClaudeModelsFromInitialization,
 } from "./ClaudeAdapter"
+import {
+  modelThinkingOptions,
+  resolvePromptInjectedEffort,
+} from "@betterc0de/schema"
 
 const queryMock = vi.hoisted(() => vi.fn())
 
@@ -94,6 +99,39 @@ function makeFakeClaudeBinary(version = "2.1.111") {
 }
 
 describe("ClaudeAdapter provider metadata", () => {
+  it.each(["claude-opus-4-8", "claude-opus-5-5", "claude-sonnet-5"])(
+    "retains Ultracode for %s before and after live model discovery",
+    (slug) => {
+      const levels = ["low", "medium", "high", "xhigh", "max"]
+      const live = buildClaudeModelsFromInitialization([
+        {
+          value: slug,
+          supportsEffort: true,
+          supportedEffortLevels: levels,
+        },
+      ])[0]
+      for (const model of [buildClaudeProviderModel(slug), live]) {
+        expect(
+          modelThinkingOptions({
+            providerKind: "claude",
+            modelId: slug,
+            capabilities: model.capabilities,
+          })
+        ).toContainEqual({ mode: "ultracode", label: "Ultracode" })
+        expect(
+          resolvePromptInjectedEffort(model.capabilities, "ultracode")
+        ).toBe("ultracode")
+        const effort = model.capabilities?.optionDescriptors?.find(
+          (option) => option.id === "effort"
+        )
+        expect(
+          effort?.type === "select" &&
+            effort.options.filter((option) => option.id === "ultracode")
+        ).toHaveLength(1)
+      }
+      expect(levels).toEqual(["low", "medium", "high", "xhigh", "max"])
+    }
+  )
   it("uses the SDK account's exact model list and Opus 5.5 effort options", () => {
     const models = buildClaudeModelsFromInitialization([
       {
@@ -319,6 +357,38 @@ describe("ClaudeAdapter provider metadata", () => {
     expect(gatedSlugs).not.toContain("claude-opus-4-8")
     expect(gatedSlugs).not.toContain("claude-fable-5")
     expect(gatedSlugs).not.toContain("claude-sonnet-5")
+  })
+
+  it("reports a Claude Code without any credential as not configured", async () => {
+    const fake = makeFakeClaudeBinary("2.1.111")
+    queryMock.mockReturnValueOnce(
+      makeInitializingQuery({
+        account: { tokenSource: "none", apiProvider: "firstParty" },
+      })
+    )
+    const adapter = new ClaudeAdapter({ binaryPath: fake.binaryPath })
+
+    await expect(adapter.probeStatus({ cwd: fake.dir })).resolves.toEqual({
+      configured: false,
+      installed: true,
+      version: "2.1.111",
+      status: "error",
+      auth: { status: "unauthenticated" },
+      message:
+        "Claude Code is not signed in. Run `claude auth login` and try again.",
+    })
+  })
+
+  it("keeps third-party Claude backends configured without an Anthropic login", async () => {
+    const fake = makeFakeClaudeBinary("2.1.111")
+    queryMock.mockReturnValueOnce(
+      makeInitializingQuery({ account: { apiProvider: "bedrock" } })
+    )
+    const adapter = new ClaudeAdapter({ binaryPath: fake.binaryPath })
+
+    await expect(adapter.probeStatus({ cwd: fake.dir })).resolves.toMatchObject(
+      { configured: true, status: "ready", auth: { status: "authenticated" } }
+    )
   })
 
   it("reports BetterC0de Claude health errors when the CLI is missing", async () => {
@@ -1868,7 +1938,7 @@ describe("ClaudeAdapter prompt-injected effort", () => {
     queryMock.mockReset()
   })
 
-  it("maps Opus 4.8 xhigh selections to Claude max effort", async () => {
+  it("passes Opus 4.8 xhigh selections to the SDK without promoting to max", async () => {
     queryMock.mockReturnValueOnce(
       makeQuery([{ type: "result", subtype: "success" }])
     )
@@ -1887,33 +1957,39 @@ describe("ClaudeAdapter prompt-injected effort", () => {
     })
 
     const queryArgs = queryMock.mock.calls[0]?.[0]
-    expect(queryArgs?.options?.effort).toBe("max")
+    expect(queryArgs?.options?.effort).toBe("xhigh")
   })
 
-  it("prefixes ultracode prompts when modelSelection carries a prompt-injected effort", async () => {
-    queryMock.mockReturnValueOnce(
-      makeQuery([{ type: "result", subtype: "success" }])
-    )
+  it.each([
+    ["claude-opus-4-8", "xhigh"],
+    ["claude-opus-5-5", "medium"],
+  ])(
+    "prefixes Ultracode for %s while keeping SDK effort at %s",
+    async (modelId, effort) => {
+      queryMock.mockReturnValueOnce(
+        makeQuery([{ type: "result", subtype: "success" }])
+      )
 
-    const adapter = new ClaudeAdapter()
-    await adapter.sendTurn({
-      threadId: "thread-ultra",
-      message: "Investigate this failure",
-      modelId: "claude-opus-4-8",
-      history: [],
-      modelSelection: {
-        instanceId: "claude",
-        model: "claude-opus-4-8",
-        options: [{ id: "effort", value: "ultracode" }],
-      },
-    })
+      const adapter = new ClaudeAdapter()
+      await adapter.sendTurn({
+        threadId: "thread-ultra",
+        message: "Investigate this failure",
+        modelId,
+        history: [],
+        modelSelection: {
+          instanceId: "claude",
+          model: modelId,
+          options: [{ id: "effort", value: "ultracode" }],
+        },
+      })
 
-    // The prompt carries the keyword; the API-side effort falls back to the
-    // ladder's default (xhigh → SDK "max").
-    const queryArgs = queryMock.mock.calls[0]?.[0]
-    expect(queryArgs?.options?.effort).toBe("max")
-    expect(queryArgs?.prompt).toBe("ultracode:\nInvestigate this failure")
-  })
+      // The prompt carries the keyword; the API-side effort falls back to the
+      // ladder's default, independently of the prompt keyword.
+      const queryArgs = queryMock.mock.calls[0]?.[0]
+      expect(queryArgs?.options?.effort).toBe(effort)
+      expect(queryArgs?.prompt).toBe("ultracode:\nInvestigate this failure")
+    }
+  )
 
   it("treats Sonnet ultracode as prompt control while keeping the default SDK effort", async () => {
     queryMock.mockReturnValueOnce(
@@ -1952,8 +2028,32 @@ describe("ClaudeAdapter prompt-injected effort", () => {
     })
 
     const queryArgs = queryMock.mock.calls[0]?.[0]
-    expect(queryArgs?.options?.effort).toBe("max")
+    expect(queryArgs?.options?.effort).toBe("xhigh")
   })
+
+  it.each([true, false])(
+    "respects Haiku thinking=%s in the SDK settings",
+    async (thinking) => {
+      queryMock.mockReturnValueOnce(
+        makeQuery([{ type: "result", subtype: "success" }])
+      )
+      const adapter = new ClaudeAdapter()
+      await adapter.sendTurn({
+        threadId: "thread-haiku-thinking",
+        message: "Hello",
+        modelId: "claude-haiku-4-5",
+        history: [],
+        modelSelection: {
+          instanceId: "claude",
+          model: "claude-haiku-4-5",
+          options: [{ id: "thinking", value: thinking }],
+        },
+      })
+      expect(
+        queryMock.mock.calls[0]?.[0]?.options?.settings?.alwaysThinkingEnabled
+      ).toBe(thinking)
+    }
+  )
 
   it("does not duplicate an existing ultracode keyword", async () => {
     queryMock.mockReturnValueOnce(
@@ -2016,6 +2116,50 @@ describe("ClaudeAdapter stream event tools", () => {
     expect(
       (await adapter.readThread("native-error" as ThreadId)).turns
     ).toEqual([])
+    await adapter.stopAll()
+  })
+
+  it("reports a usage limit with the CLI's message and the reset it was given", async () => {
+    queryMock.mockReturnValueOnce(
+      makeQuery([
+        {
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "rejected",
+            resetsAt: 1_900_000_000,
+            rateLimitType: "five_hour",
+          },
+        },
+        {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          result: "5-hour limit reached ∙ resets 3pm",
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      ])
+    )
+    const adapter = new ClaudeAdapter()
+    const events: ProviderRuntimeEvent[] = []
+    adapter.subscribe((event) => events.push(event))
+    await adapter.sendTurn({
+      threadId: "usage-limit",
+      message: "hello",
+      modelId: "claude-opus-4-7",
+      history: [],
+    })
+    expect(
+      events.find((event) => event.type === "runtime.error")
+    ).toMatchObject({
+      message: "5-hour limit reached ∙ resets 3pm",
+      detail: { limit: { kind: "usage", resetAt: 1_900_000_000 } },
+    })
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        error: "5-hour limit reached ∙ resets 3pm",
+      }),
+    ])
     await adapter.stopAll()
   })
 
@@ -2309,6 +2453,136 @@ describe("ClaudeAdapter conversation rollback", () => {
     )
   })
 
+  it("sends image attachments as SDK content blocks and lists the rest", async () => {
+    queryMock.mockReturnValueOnce(
+      makeQuery([{ type: "result", subtype: "success" }])
+    )
+    const adapter = new ClaudeAdapter()
+    await adapter.sendTurn({
+      threadId: "thread-attachments",
+      message: "what is on the screenshot?",
+      modelId: "claude-opus-4-7",
+      history: [],
+      attachments: [
+        {
+          type: "file",
+          filename: "shot.png",
+          mediaType: "image/png",
+          url: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        {
+          type: "file",
+          filename: "spec.pdf",
+          mediaType: "application/pdf",
+          url: "data:application/pdf;base64,JVBERi0=",
+        },
+      ],
+    })
+
+    const prompt = queryMock.mock.calls[0]?.[0]?.prompt as AsyncIterable<{
+      type: string
+      message: { content: Array<Record<string, unknown>> }
+    }>
+    expect(typeof prompt).not.toBe("string")
+    const messages = []
+    for await (const message of prompt) messages.push(message)
+    expect(messages).toHaveLength(1)
+    const [text, image] = messages[0]!.message.content
+    expect(messages[0]!.type).toBe("user")
+    expect(text).toMatchObject({ type: "text" })
+    expect(String(text?.text)).toContain("what is on the screenshot?")
+    expect(String(text?.text)).toContain("spec.pdf")
+    expect(String(text?.text)).not.toContain("shot.png")
+    expect(image).toEqual({
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+    })
+    await adapter.stopAll()
+  })
+
+  it("retains only a slim, bounded projection of SDK messages per turn", async () => {
+    const hugeFile = "x".repeat(200_000)
+    queryMock.mockReturnValueOnce(
+      makeQuery([
+        ...Array.from({ length: 50 }, (_, index) => ({
+          type: "stream_event",
+          session_id: "sdk-session-slim",
+          event: {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: `t${index}` },
+          },
+        })),
+        {
+          type: "assistant",
+          uuid: "assistant-tool",
+          session_id: "sdk-session-slim",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "tool-write",
+                name: "Write",
+                input: { file_path: "big.txt", content: hugeFile },
+              },
+            ],
+          },
+        },
+        {
+          type: "user",
+          session_id: "sdk-session-slim",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tool-write",
+                content: hugeFile,
+              },
+            ],
+          },
+        },
+        {
+          type: "assistant",
+          uuid: "assistant-final",
+          session_id: "sdk-session-slim",
+          message: { content: [{ type: "text", text: "done" }] },
+        },
+        { type: "result", subtype: "success", session_id: "sdk-session-slim" },
+      ])
+    )
+    const adapter = new ClaudeAdapter()
+    const threadId = "thread-slim-snapshot" as ThreadId
+    await adapter.sendTurn({
+      threadId,
+      message: "write it",
+      modelId: "claude-opus-4-7",
+      history: [],
+    })
+
+    const [turn] = (await adapter.readThread(threadId)).turns
+    const items = turn?.items as Array<Record<string, unknown>>
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "result",
+    ])
+    expect(items[1]).toEqual({
+      type: "assistant",
+      uuid: "assistant-tool",
+      session_id: "sdk-session-slim",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tool-write", name: "Write" }],
+      },
+    })
+    expect(JSON.stringify(items).length).toBeLessThan(2_000)
+    await adapter.stopAll()
+  })
+
   it("hydrates and persists Claude resume cursors across adapter restarts", async () => {
     queryMock.mockReturnValueOnce(
       makeQuery([
@@ -2459,7 +2733,7 @@ describe("ClaudeAdapter imagegen tool wiring", () => {
     queryMock.mockReset()
   })
 
-  it("registers imagegen and auto-allows it only with explicit edit permission", async () => {
+  it("registers imagegen and auto-allows it only under bypass", async () => {
     queryMock.mockReturnValueOnce(
       makeQuery([{ type: "result", subtype: "success" }])
     )
@@ -2474,7 +2748,7 @@ describe("ClaudeAdapter imagegen tool wiring", () => {
       modelId: "claude-opus-4-7",
       history: [],
       chatMode: "agent",
-      permissionLevel: "allow-edits",
+      permissionLevel: "bypass",
       projectPath: repoPath,
     })
 
@@ -2511,7 +2785,7 @@ describe("ClaudeAdapter imagegen tool wiring", () => {
     ).toBe(false)
   })
 
-  it.each(["default", "ask-on-edit"])(
+  it.each(["default", "ask-on-edit", "allow-edits"])(
     "routes imagegen through normal approval at the %s permission level",
     async (permissionLevel) => {
       queryMock.mockReturnValueOnce(
@@ -2598,6 +2872,8 @@ describe("ClaudeAdapter imagegen tool wiring", () => {
       projectPath: repoPath,
     })
     const readOnlyOptions = queryMock.mock.calls[1]?.[0]?.options
+    // The tool is disallowed for the whole query, so its server is not started.
+    expect(readOnlyOptions?.mcpServers?.betterc0de).toBeUndefined()
     expect(readOnlyOptions).not.toHaveProperty("allowedTools")
     expect(readOnlyOptions?.disallowedTools).toContain(
       "mcp__betterc0de__generate_image"

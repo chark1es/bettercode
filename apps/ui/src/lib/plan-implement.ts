@@ -3,7 +3,7 @@ import {
   derivePendingPlanApprovals,
   type PendingPlanApproval,
 } from "@/lib/pending-approvals"
-import { respondToPlanApproval } from "@/services/backend"
+import { respondToPlanApproval } from "@/services/backend/chatApi"
 
 /**
  * Single source of truth for "implement this plan".
@@ -38,7 +38,11 @@ export function selectPlanApprovalForImplement(
 // consumed) and surface as an error bubble.
 const implementInFlight = new Set<string>()
 
-export type ImplementOutcome = "resolved" | "no-approval" | "in-flight" | "error"
+export type ImplementOutcome =
+  | "resolved"
+  | "no-approval"
+  | "in-flight"
+  | "error"
 
 /**
  * Resolve a pending plan approval for `threadId` (approve + acceptEdits by

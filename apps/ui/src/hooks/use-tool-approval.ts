@@ -1,4 +1,5 @@
 import { useCallback } from "react"
+import { getElectronApi } from "@/services/ipc-facade"
 
 /** Provider kinds that accept `/chat/approval` over HTTP. Keep in sync with
  *  the adapters in `apps/backend/src/provider/*` that implement
@@ -24,7 +25,9 @@ const HTTP_APPROVAL_KINDS = new Set([
 export function isHttpApprovalProviderKind(
   providerKind: string | null | undefined
 ): boolean {
-  return typeof providerKind === "string" && HTTP_APPROVAL_KINDS.has(providerKind)
+  return (
+    typeof providerKind === "string" && HTTP_APPROVAL_KINDS.has(providerKind)
+  )
 }
 
 /**
@@ -48,13 +51,19 @@ export function useToolApproval(_permissionLevel: string) {
         threadId?: string
       }
     ) => {
-      if (context?.pluginId && window.electronAPI?.pluginSend) {
-        ;window.electronAPI
+      const desktopBridge = getElectronApi()
+      if (context?.pluginId && desktopBridge?.pluginSend) {
+        desktopBridge
           .pluginSend(context.pluginId, "respondToolApproval", {
             requestId,
             approved,
           })
-          .catch(() => { console.warn("Failed to send tool approval to plugin:", context.pluginId) })
+          .catch(() => {
+            console.warn(
+              "Failed to send tool approval to plugin:",
+              context.pluginId
+            )
+          })
         return
       }
 

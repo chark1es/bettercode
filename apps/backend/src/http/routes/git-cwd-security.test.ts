@@ -4,14 +4,20 @@ import path from "node:path"
 import { Hono } from "hono"
 import { describe, expect, it } from "vitest"
 import type { AppState } from "../../appState"
-import { registerGitRoutes } from "./git"
+import { registerGitRoutes as registerGitRoutesUnfilled } from "./git"
+import { withInertStateArgument } from "../../testUtils/inert-app-state"
+
+// Doubles name only what a test exercises; the rest is filled in inert.
+const registerGitRoutes = withInertStateArgument(registerGitRoutesUnfilled, 1)
 
 describe("git route cwd confinement", () => {
   it("rejects an unregistered cwd for mutations and reads", async () => {
     const registered = await fs.mkdtemp(
       path.join(os.tmpdir(), "bc0de-git-approved-")
     )
-    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "bc0de-git-outside-"))
+    const outside = await fs.mkdtemp(
+      path.join(os.tmpdir(), "bc0de-git-outside-")
+    )
     const state = {
       projectProjections: { listAll: () => [{ path: registered }] },
       threads: { listProjects: () => [] },

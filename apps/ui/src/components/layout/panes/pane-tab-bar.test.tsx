@@ -4,7 +4,8 @@ import type { Pane } from "@/hooks/use-panes"
 
 const prefs = vi.hoisted(() => ({ workspaceOpen: false }))
 vi.mock("@/lib/chat-store", () => ({
-  useChatStore: (select: (store: unknown) => unknown) => select({ threads: [] }),
+  useChatStore: (select: (store: unknown) => unknown) =>
+    select({ threads: [] }),
 }))
 vi.mock("@/lib/preferences-store", () => ({
   usePreferencesStore: Object.assign(
@@ -19,9 +20,20 @@ vi.mock("@/components/attention/attention-badge", () => ({
 vi.mock("@/components/layout/panes/pane-running-dot", () => ({
   PaneRunningDot: () => null,
 }))
+vi.mock("@/components/chat/compare-group", () => ({
+  CompareSwitcher: () => null,
+}))
+vi.mock("@/components/pull-requests/thread-pull-request-chip", () => ({
+  ThreadPullRequestChip: () => null,
+}))
 import { PaneTabBar } from "./pane-tab-bar"
 
-const chatTab = { id: "t-chat", kind: "chat", title: "Chat", threadId: "thread-1" } as const
+const chatTab = {
+  id: "t-chat",
+  kind: "chat",
+  title: "Chat",
+  threadId: "thread-1",
+} as const
 
 function render(pane: Pane, isActive = true, workspaceOpen = false) {
   prefs.workspaceOpen = workspaceOpen
@@ -48,7 +60,10 @@ const solo = {
 
 const tabbed = {
   ...solo,
-  tabs: [chatTab, { id: "t-diff", kind: "diff", title: "Diff", threadId: "thread-1" }],
+  tabs: [
+    chatTab,
+    { id: "t-diff", kind: "diff", title: "Diff", threadId: "thread-1" },
+  ],
 } as unknown as Pane
 
 describe("pane tab bar controls", () => {

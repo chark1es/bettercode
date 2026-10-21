@@ -33,6 +33,11 @@ interface WaitingLease {
  * when both resolve to the same Git common directory. The latter makes linked
  * worktrees share one recovery boundary even though their filesystem paths are
  * siblings.
+ *
+ * Each backend owns one: `createBootRoot` constructs it
+ * (`BootRoot.workspaceRecoveryGate`, the same one as
+ * `AppState.workspaceRecoveryGate`), and the recovery fences, the revert saga
+ * and thread retention receive it from there. A test builds its own.
  */
 export class WorkspaceRecoveryGate {
   private readonly active = new Map<number, ActiveLease>()
@@ -79,10 +84,7 @@ export class WorkspaceRecoveryGate {
       this.waiting.push(waiter)
       this.drain()
     })
-    const timeoutMs = Math.max(
-      1,
-      Math.floor(options.timeoutMs ?? 30_000)
-    )
+    const timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? 30_000))
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null
     const timeout = new Promise<never>((_, reject) => {
       timeoutHandle = setTimeout(
@@ -239,8 +241,6 @@ export class WorkspaceRecoveryGate {
     }
   }
 }
-
-export const workspaceRecoveryGate = new WorkspaceRecoveryGate()
 
 export function resolveWorkspaceRecoveryScopes(
   workspaces: string | readonly string[]

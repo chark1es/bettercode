@@ -152,9 +152,7 @@ function quoteForArgv(value: string): string {
   // Double every backslash run that immediately precedes a quote, then escape
   // the quote. Also double a trailing backslash run so it does not escape the
   // closing quote we are about to add.
-  const escaped = value
-    .replace(/(\\*)"/g, '$1$1\\"')
-    .replace(/(\\+)$/, "$1$1")
+  const escaped = value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")
   return `"${escaped}"`
 }
 
@@ -185,7 +183,9 @@ function escapeForCmd(token: string): string {
 export function quoteWindowsCmdPath(command: string): string {
   if (/["\r\n\0%!]/.test(command)) {
     throw Object.assign(
-      new Error("Executable path must not contain a quote, control, or expansion character."),
+      new Error(
+        "Executable path must not contain a quote, control, or expansion character."
+      ),
       { statusCode: 400 }
     )
   }
@@ -204,12 +204,21 @@ export function buildWindowsCmdArgs(
 ): string[] {
   for (const value of [command, ...args]) {
     if (/[\r\n\0]/.test(value)) {
-      throw Object.assign(new Error("Windows command arguments must not contain CR, LF, or NUL."), { statusCode: 400 })
+      throw Object.assign(
+        new Error("Windows command arguments must not contain CR, LF, or NUL."),
+        { statusCode: 400 }
+      )
     }
   }
-  const directExecutable = /\.exe$/i.test(command) && path.win32.isAbsolute(command)
+  const directExecutable =
+    /\.exe$/i.test(command) && path.win32.isAbsolute(command)
   if (!directExecutable && args.some((value) => value.includes('"'))) {
-    throw Object.assign(new Error("Quoted arguments require an absolute executable rather than a batch shim."), { statusCode: 400 })
+    throw Object.assign(
+      new Error(
+        "Quoted arguments require an absolute executable rather than a batch shim."
+      ),
+      { statusCode: 400 }
+    )
   }
   const line = [
     quoteWindowsCmdPath(command),
@@ -218,10 +227,23 @@ export function buildWindowsCmdArgs(
   return ["/d", "/s", "/c", `"${line}"`]
 }
 
-/** Absolute ComSpec, falling back to `cmd.exe` on PATH. */
+/**
+ * Absolute ComSpec, falling back to `%SystemRoot%\System32\cmd.exe`. Never
+ * the bare `cmd.exe`: spawned with the workspace as cwd, Windows would look
+ * for it in the workspace first.
+ *
+ * Self-contained on purpose: `scripts/spawn-cli-quoting.test.mjs` transpiles
+ * this file on its own, so it must not import other backend modules.
+ */
 export function resolveComSpec(): string {
-  const comSpec = process.env.ComSpec
-  return comSpec && comSpec.length > 0 ? comSpec : "cmd.exe"
+  const comSpec = process.env.ComSpec?.trim()
+  if (comSpec && /^[a-zA-Z]:[\\/]/.test(comSpec)) return comSpec
+  const systemRoot = (process.env.SystemRoot ?? process.env.windir)?.trim()
+  const root =
+    systemRoot && /^[a-zA-Z]:[\\/]/.test(systemRoot)
+      ? systemRoot
+      : "C:\\Windows"
+  return path.win32.join(root, "System32", "cmd.exe")
 }
 
 /**

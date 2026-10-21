@@ -1,18 +1,6 @@
 import type { Hono } from "hono"
-import {
-  agentPermissionEvaluateSchema,
-  agentPermissionGrantDeleteSchema,
-  agentPermissionGrantListSchema,
-  agentPermissionGrantUpsertSchema,
-  workspaceTrustGetSchema,
-  workspaceTrustSetSchema,
-} from "@betterc0de/schema"
 import type { AppState } from "../../appState"
-import {
-  permissionRulesListSchema,
-  permissionRuleDeleteSchema,
-} from "../validation"
-import { parseAndHandle } from "../routeHelpers"
+import { handleHttpContract } from "../contracts"
 import {
   listClaudePermissionRules,
   deleteClaudePermissionRule,
@@ -38,31 +26,57 @@ const REMOTE_PERMISSION_READS = [
  * Permission-rules management for the settings UI: lists and deletes the
  * "Always allow" rules persisted by approval decisions — file-based rules in
  * the Claude settings files plus the in-memory per-thread session mirror.
+ * Every route parses and answers through its shared contract
+ * (`@betterc0de/schema/http-contracts`, `chat-contracts.ts`).
  */
 export function registerPermissionsRoutes(
   api: Hono,
-  state: Pick<AppState, "config" | "remoteAccess" | "checkpointReverts" | "agentPermissions" | "db" | "projectProjections" | "threads" | "worktreeRegistry">
+  state: Pick<
+    AppState,
+    | "config"
+    | "remoteAccess"
+    | "checkpointReverts"
+    | "workspaceRecoveryGate"
+    | "agentPermissions"
+    | "db"
+    | "projectProjections"
+    | "threads"
+    | "worktreeRegistry"
+  >
 ): void {
   // Policy mutations, including newly added actions, require the desktop owner.
   // Remote approval responses are separate, request-scoped chat endpoints.
   api.use("/permissions/*", async (c, next) => {
-    const readOnly = c.req.method === "POST" &&
+    const readOnly =
+      c.req.method === "POST" &&
       REMOTE_PERMISSION_READS.some((route) => c.req.path.endsWith(route))
-    if (!readOnly && resolveRequestIdentity(c, state.config, state.remoteAccess)?.kind !== "local") {
-      return c.json({ error: "Only the desktop host can change permission policy.", code: "remote_host_owner_required" }, 403)
+    if (
+      !readOnly &&
+      resolveRequestIdentity(c, state.config, state.remoteAccess)?.kind !==
+        "local"
+    ) {
+      return c.json(
+        {
+          error: "Only the desktop host can change permission policy.",
+          code: "remote_host_owner_required",
+        },
+        403
+      )
     }
     return next()
   })
   api.post("/permissions/claude-rules/list", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      permissionRulesListSchema,
+      "permissionClaudeRulesList",
       async (body) => {
         const cwd = body.cwd?.trim()
-        const approvedCwd = cwd &&
-          resolveRequestIdentity(c, state.config, state.remoteAccess)?.kind === "remote"
-          ? await resolveApprovedWorkspaceRoot(state, cwd)
-          : cwd
+        const approvedCwd =
+          cwd &&
+          resolveRequestIdentity(c, state.config, state.remoteAccess)?.kind ===
+            "remote"
+            ? await resolveApprovedWorkspaceRoot(state, cwd)
+            : cwd
         return { rules: listClaudePermissionRules({ cwd: approvedCwd }) }
       },
       { operation: "permissions claude-rules list" }
@@ -70,13 +84,13 @@ export function registerPermissionsRoutes(
   )
 
   api.post("/permissions/claude-rules/delete", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      permissionRuleDeleteSchema,
+      "permissionClaudeRuleDelete",
       async (body) => {
         if (body.source === "session") {
           return {
-            status: "failed",
+            status: "failed" as const,
             error: "Use /permissions/session-rules/delete",
           }
         }
@@ -92,50 +106,50 @@ export function registerPermissionsRoutes(
           source === "userSettings" ? null : body.cwd?.trim() || null
         const deleted = workspace
           ? await withCheckpointRecoveryMutation(
-                  state,
-                  { workspaces: [workspace] },
-                  removeRule
-                )
+              state,
+              { workspaces: [workspace] },
+              removeRule
+            )
           : removeRule()
         return deleted
-          ? { status: "acknowledged" }
-          : { status: "failed", error: "Rule not found" }
+          ? { status: "acknowledged" as const }
+          : { status: "failed" as const, error: "Rule not found" }
       },
       { operation: "permissions claude-rules delete" }
     )
   )
 
   api.post("/permissions/session-rules/list", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      permissionRulesListSchema,
-      async (body) => ({
-        rules: body.threadId
-          ? listSessionRules(body.threadId).map((rule) => ({
-              ...rule,
-              threadId: body.threadId,
-            }))
-          : listAllSessionRules(),
-      }),
+      "permissionSessionRulesList",
+      async (body) => {
+        const threadId = body.threadId
+        return {
+          rules: threadId
+            ? listSessionRules(threadId).map((rule) => ({ ...rule, threadId }))
+            : listAllSessionRules(),
+        }
+      },
       { operation: "permissions session-rules list" }
     )
   )
 
   api.post("/permissions/session-rules/delete", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      permissionRuleDeleteSchema,
+      "permissionSessionRuleDelete",
       async (body) => {
         if (!body.threadId) {
-          return { status: "failed", error: "threadId is required" }
+          return { status: "failed" as const, error: "threadId is required" }
         }
         const deleted = deleteSessionRule(body.threadId, {
           behavior: body.behavior,
           rule: body.rule,
         })
         return deleted
-          ? { status: "acknowledged" }
-          : { status: "failed", error: "Rule not found" }
+          ? { status: "acknowledged" as const }
+          : { status: "failed" as const, error: "Rule not found" }
       },
       { operation: "permissions session-rules delete" }
     )
@@ -144,9 +158,9 @@ export function registerPermissionsRoutes(
   const agentPermissions = state.agentPermissions
 
   api.post("/permissions/grants/list", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      agentPermissionGrantListSchema,
+      "permissionGrantsList",
       async (body) => ({
         grants: agentPermissions.listGrants({
           workspacePath: body.workspacePath,
@@ -159,9 +173,9 @@ export function registerPermissionsRoutes(
   )
 
   api.post("/permissions/grants/upsert", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      agentPermissionGrantUpsertSchema,
+      "permissionGrantUpsert",
       async (body) => ({
         grant: agentPermissions.upsertGrant(body),
       }),
@@ -170,21 +184,21 @@ export function registerPermissionsRoutes(
   )
 
   api.post("/permissions/grants/delete", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      agentPermissionGrantDeleteSchema,
+      "permissionGrantDelete",
       async (body) =>
         agentPermissions.deleteGrant(body.id)
-          ? { status: "acknowledged" }
-          : { status: "failed", error: "Grant not found" },
+          ? { status: "acknowledged" as const }
+          : { status: "failed" as const, error: "Grant not found" },
       { operation: "permissions grants delete" }
     )
   )
 
   api.post("/permissions/grants/evaluate", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      agentPermissionEvaluateSchema,
+      "permissionGrantEvaluate",
       async (body) => ({
         evaluation: agentPermissions.evaluateTool(body),
       }),
@@ -193,9 +207,9 @@ export function registerPermissionsRoutes(
   )
 
   api.post("/permissions/workspace-trust/get", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      workspaceTrustGetSchema,
+      "workspaceTrustGet",
       async (body) => ({
         trust: agentPermissions.getWorkspaceTrust(body.workspacePath),
       }),
@@ -204,9 +218,9 @@ export function registerPermissionsRoutes(
   )
 
   api.post("/permissions/workspace-trust/set", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      workspaceTrustSetSchema,
+      "workspaceTrustSet",
       async (body) => ({
         trust: agentPermissions.setWorkspaceTrust(body),
       }),
@@ -217,9 +231,9 @@ export function registerPermissionsRoutes(
   // Called when the user deliberately opens a folder. Unlike `set` it never
   // overrides a decision the user already made, in either direction.
   api.post("/permissions/workspace-trust/ensure", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      workspaceTrustGetSchema,
+      "workspaceTrustEnsure",
       async (body) => ({
         trust: agentPermissions.ensureWorkspaceTrusted(body.workspacePath),
       }),

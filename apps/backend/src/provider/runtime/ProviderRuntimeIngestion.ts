@@ -3,8 +3,11 @@ import type {
   ThreadMessageUpsertRequest,
   ThreadSaveMessage,
 } from "../../services/threads/types"
-import { projectProviderEventToThreadActivity } from "../activity-projection"
-import type { ProviderRuntimeEvent } from "../types"
+import {
+  boundProviderRuntimeEventForBroadcast,
+  projectProviderEventToThreadActivity,
+} from "../activity-projection"
+import type { LegacyProviderEvent } from "../types"
 import type { ProviderRuntimeEvent as CanonicalProviderRuntimeEvent } from "./contracts"
 import { getBackendLoggingSettings } from "../../observability/logger"
 import { ProviderRuntimeJournalSerializationError } from "./ProviderRuntimeEventJournal"
@@ -23,7 +26,10 @@ import {
   type LegacyViewBridge,
   type ProviderRuntimeJournalEntry,
 } from "./journalEntry"
-import { canonicalProviderKindAlias } from "./providerKindAliases"
+import {
+  canonicalProviderKindAlias,
+  compactProviderAlias,
+} from "./providerKindAliases"
 import { isGenericToolName, asRecord, readString } from "@betterc0de/schema"
 import {
   backendMetrics,
@@ -35,14 +41,14 @@ import {
 /**
  * Two intake lanes: `"event"` carries the legacy shape (the frozen in-process
  * provider stack and the checkpoint reactor's own emissions), `"canonical"`
- * carries the runtime hub's `ProviderRuntimeEvent`. Both are journaled
+ * carries the runtime hub's canonical `ProviderRuntimeEvent`. Both are journaled
  * before anything else; only the canonical lane runs the legacy bridge, and
  * it runs it behind the journal.
  */
 export interface ProviderRuntimeEventBusLike {
   on(
     eventName: "event",
-    listener: (event: ProviderRuntimeEvent) => void
+    listener: (event: LegacyProviderEvent) => void
   ): unknown
   on(
     eventName: "canonical",
@@ -50,7 +56,7 @@ export interface ProviderRuntimeEventBusLike {
   ): unknown
   off(
     eventName: "event",
-    listener: (event: ProviderRuntimeEvent) => void
+    listener: (event: LegacyProviderEvent) => void
   ): unknown
   off(
     eventName: "canonical",
@@ -65,7 +71,14 @@ export interface ProviderRuntimeActivityStore {
 
 export interface ProviderRuntimeThreadMetadataStore {
   updateThreadTitle(threadId: string, title: string, updatedAt?: string): void
-  updateThreadGoal?(threadId: string, goal: unknown, providerKind?: string, updatedAt?: string): void
+  updateThreadGoal?(
+    threadId: string,
+    goal: unknown,
+    providerKind?: string,
+    updatedAt?: string
+  ): void
+  /** The backend's own Autonomous Work run state (`null`: no run). */
+  updateThreadAutonomy?(threadId: string, autonomy: unknown): void
 }
 
 type ProviderRuntimeLifecycleKind =
@@ -118,7 +131,7 @@ export interface ProviderRuntimeSessionLifecycleStore {
 }
 
 export interface ProviderRuntimeCheckpointDiffStore {
-  recordRuntimeEvent(event: ProviderRuntimeEvent): void
+  recordRuntimeEvent(event: LegacyProviderEvent): void
 }
 
 export interface ProviderRuntimeEventJournal {
@@ -168,10 +181,7 @@ export interface ProviderRuntimeChatDispatchLifecycleStore {
 
 export interface ProviderRuntimeTranscriptStore {
   upsertMessage(input: ThreadMessageUpsertRequest): void
-  getMessage?(
-    threadId: string,
-    messageId: string
-  ): ThreadSaveMessage | null
+  getMessage?(threadId: string, messageId: string): ThreadSaveMessage | null
 }
 
 export interface ProviderRuntimeTranscriptRecoveryStore {
@@ -354,7 +364,7 @@ export interface ProviderRuntimeIngestionOptions {
    * sees an event before the journal did, never one the bridge declined or
    * failed on, and never a journaled one whose projection was blocked.
    */
-  readonly projectedSink?: (event: ProviderRuntimeEvent) => void
+  readonly projectedSink?: (event: LegacyProviderEvent) => void
 }
 
 const MAX_BUFFERED_PROPOSED_PLANS = 10_000
@@ -415,7 +425,10 @@ interface ProcessProviderRuntimeEventOptions {
  * as a persistence failure — the row is durable and waits for replay.
  */
 export class ProviderRuntimeBridgeError extends Error {
-  constructor(cause: Error, readonly eventType: string) {
+  constructor(
+    cause: Error,
+    readonly eventType: string
+  ) {
     super(cause.message, { cause })
     this.name = "ProviderRuntimeBridgeError"
   }
@@ -620,7 +633,7 @@ export class ProviderRuntimeIngestion {
     if (this.unsubscribe) return this.unsubscribe
     this.stopped = false
     if (this.journalQueue.length > 0) this.scheduleJournalQueueRetry()
-    const listener = (event: ProviderRuntimeEvent) => this.ingest(event)
+    const listener = (event: LegacyProviderEvent) => this.ingest(event)
     const canonicalListener = (event: CanonicalProviderRuntimeEvent) =>
       this.ingestCanonical(event)
     this.options.eventBus.on("event", listener)
@@ -695,7 +708,7 @@ export class ProviderRuntimeIngestion {
   }
 
   /** Legacy-shaped intake: the frozen in-process stack and the reactor. */
-  ingest(event: ProviderRuntimeEvent): void {
+  ingest(event: LegacyProviderEvent): void {
     this.ingestEntry(legacyJournalEntry(event))
   }
 
@@ -777,9 +790,10 @@ export class ProviderRuntimeIngestion {
    * and again after it for projection. A bridge that throws is reported as
    * a failed view (`error`) so the caller can decide what that costs.
    */
-  private legacyViewOfEntry(
-    entry: ProviderRuntimeJournalEntry
-  ): { readonly view: ProviderRuntimeEvent | null; readonly error: unknown } {
+  private legacyViewOfEntry(entry: ProviderRuntimeJournalEntry): {
+    readonly view: LegacyProviderEvent | null
+    readonly error: unknown
+  } {
     try {
       return { view: legacyViewOf(entry, this.options.legacyView), error: null }
     } catch (error) {
@@ -806,11 +820,12 @@ export class ProviderRuntimeIngestion {
     let durableDispatchTerminal = false
     if (terminalDispatch && this.options.chatDispatchLifecycleStore) {
       try {
-        durableDispatchTerminal = this.options.chatDispatchLifecycleStore.hasProviderTurn(
-          eventMeta.thread,
-          terminalDispatch.providerInstanceId,
-          terminalDispatch.providerTurnId
-        )
+        durableDispatchTerminal =
+          this.options.chatDispatchLifecycleStore.hasProviderTurn(
+            eventMeta.thread,
+            terminalDispatch.providerInstanceId,
+            terminalDispatch.providerTurnId
+          )
       } catch (error) {
         // A lifecycle lookup failure must not bypass the journal. Assume the
         // event is durable so replay can converge after storage recovers.
@@ -896,7 +911,13 @@ export class ProviderRuntimeIngestion {
       // replay does not re-offer it; a future bridge can re-project it.
       this.noteDeclinedEntry(journaled, eventMeta)
       if (journalSequence !== undefined) {
-        if (!this.markProjectionReceipt(journalSequence, failureSourceOfEntry(journaled), eventMeta)) {
+        if (
+          !this.markProjectionReceipt(
+            journalSequence,
+            failureSourceOfEntry(journaled),
+            eventMeta
+          )
+        ) {
           return true
         }
         this.projectionDegradedThreads.delete(eventMeta.thread)
@@ -1078,9 +1099,12 @@ export class ProviderRuntimeIngestion {
           )
         }
         this.logProviderRuntimeEvent(event, wireMeta, clients)
+        // The wire copy of a tool or approval frame is bounded like the
+        // activity it projects to; the journal and every listener above
+        // keep the event whole.
         this.options.broadcaster.broadcast({
           channel: "provider.runtimeEvent",
-          data: event,
+          data: boundProviderRuntimeEventForBroadcast(event),
         })
       } catch (err) {
         this.options.logger.error(
@@ -1093,7 +1117,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private ingestChatDispatchLifecycle(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     strictProjection: boolean
   ): boolean {
     const store = this.options.chatDispatchLifecycleStore
@@ -1194,7 +1218,11 @@ export class ProviderRuntimeIngestion {
     const receipts = this.options.projectionReceipts
     if (!receipts) return true
     let lastError: unknown
-    for (let attempt = 1; attempt <= PROJECTION_RECEIPT_ATTEMPTS; attempt += 1) {
+    for (
+      let attempt = 1;
+      attempt <= PROJECTION_RECEIPT_ATTEMPTS;
+      attempt += 1
+    ) {
       try {
         receipts.markProjected(journalSequence)
         return true
@@ -1294,7 +1322,7 @@ export class ProviderRuntimeIngestion {
     this.projectionDegradedThreads.add(source.threadId)
     const sequence = this.sequence + 1
     this.sequence = sequence
-    const notice: ProviderRuntimeEvent = {
+    const notice: LegacyProviderEvent = {
       event_type: "runtime.warning",
       thread_id: source.threadId,
       payload: {
@@ -1327,7 +1355,9 @@ export class ProviderRuntimeIngestion {
     }
   }
 
-  private enqueueJournalBlockedEvent(entry: ProviderRuntimeJournalEntry): boolean {
+  private enqueueJournalBlockedEvent(
+    entry: ProviderRuntimeJournalEntry
+  ): boolean {
     const bytes = journalEntryBytes(entry, DEFAULT_JOURNAL_QUEUE_MAX_BYTES)
     const queueAtCapacity =
       this.journalQueue.length >= this.journalQueueMaxEvents ||
@@ -1457,7 +1487,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private ingestAssistantTranscript(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     flushImmediately = false,
     projectionSequence = this.sequence,
     recoverySnapshot = false
@@ -1489,7 +1519,8 @@ export class ProviderRuntimeIngestion {
     const key = assistantTranscriptKey(event.thread_id, turnId)
 
     if (isAssistantContentEvent(event.event_type, payload)) {
-      if (this.isAssistantTranscriptEvicted(key, event.thread_id, turnId)) return true
+      if (this.isAssistantTranscriptEvicted(key, event.thread_id, turnId))
+        return true
       const text = providerTranscriptText(event.event_type, payload)
       if (text === undefined) return true
       const transcript = this.assistantTranscript(
@@ -1509,7 +1540,9 @@ export class ProviderRuntimeIngestion {
         transcript,
         "content",
         !isReplaceEvent(event.event_type) &&
-          text && transcript.assistantTextBoundaryPending && transcript.content
+          text &&
+          transcript.assistantTextBoundaryPending &&
+          transcript.content
           ? `${assistantParagraphSeparator(transcript.content, text)}${text}`
           : text,
         isReplaceEvent(event.event_type)
@@ -1531,7 +1564,8 @@ export class ProviderRuntimeIngestion {
     }
 
     if (isReasoningContentEvent(event.event_type)) {
-      if (this.isAssistantTranscriptEvicted(key, event.thread_id, turnId)) return true
+      if (this.isAssistantTranscriptEvicted(key, event.thread_id, turnId))
+        return true
       const text = providerTranscriptText(event.event_type, payload)
       if (text === undefined) return true
       const transcript = this.assistantTranscript(
@@ -1567,7 +1601,8 @@ export class ProviderRuntimeIngestion {
     }
 
     if (transcriptToolPhase(event.event_type, payload)) {
-      if (this.isAssistantTranscriptEvicted(key, event.thread_id, turnId)) return true
+      if (this.isAssistantTranscriptEvicted(key, event.thread_id, turnId))
+        return true
       const transcript = this.assistantTranscript(
         event,
         payload,
@@ -1596,11 +1631,19 @@ export class ProviderRuntimeIngestion {
     // Persist the boundary with the same projection receipt so recovery neither
     // glues paragraphs together nor inserts separators between token chunks.
     if (isAssistantMessageBoundary(event.event_type, payload)) {
-      if (this.isAssistantTranscriptEvicted(key, event.thread_id, turnId)) return true
-      const transcript = this.assistantTranscript(event, payload, turnId, recoverySnapshot)
+      if (this.isAssistantTranscriptEvicted(key, event.thread_id, turnId))
+        return true
+      const transcript = this.assistantTranscript(
+        event,
+        payload,
+        turnId,
+        recoverySnapshot
+      )
       if (projectionSequence <= transcript.lastAppliedProjectionSequence) {
         return this.flushPreviouslyAppliedAssistantTranscript(
-          key, transcript, flushImmediately
+          key,
+          transcript,
+          flushImmediately
         )
       }
       transcript.assistantTextBoundaryPending = true
@@ -1612,7 +1655,12 @@ export class ProviderRuntimeIngestion {
     }
 
     if (!isTerminalJournalEventType(event.event_type)) return true
-    const transcript = this.assistantTranscript(event, payload, turnId, recoverySnapshot)
+    const transcript = this.assistantTranscript(
+      event,
+      payload,
+      turnId,
+      recoverySnapshot
+    )
     let persisted = true
     if (transcript) {
       if (projectionSequence > transcript.lastAppliedProjectionSequence) {
@@ -1635,7 +1683,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private assistantTranscript(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     payload: Record<string, unknown>,
     turnId: string,
     recoverySnapshot = false
@@ -1699,28 +1747,24 @@ export class ProviderRuntimeIngestion {
       reasoningBytes,
       toolCalls,
       toolCallsBytes,
-      providerKind: readString(
-        payload,
-        "providerKind",
-        "provider_kind",
-        "provider"
-      ) ?? readString(persistedExtra, "providerKind", "provider_kind"),
-      providerInstanceId: readString(
-        payload,
-        "providerInstanceId",
-        "provider_instance_id"
-      ) ?? readString(
-        persistedExtra,
-        "providerInstanceId",
-        "provider_instance_id"
-      ),
+      providerKind:
+        readString(payload, "providerKind", "provider_kind", "provider") ??
+        readString(persistedExtra, "providerKind", "provider_kind"),
+      providerInstanceId:
+        readString(payload, "providerInstanceId", "provider_instance_id") ??
+        readString(
+          persistedExtra,
+          "providerInstanceId",
+          "provider_instance_id"
+        ),
       status: readString(persistedExtra, "status"),
       truncated: persistedExtra.transcriptTruncated === true || undefined,
       retryAttempts: 0,
       bytesSincePersist: 0,
     }
     this.bufferedAssistantTranscripts.set(key, transcript)
-    this.bufferedAssistantTranscriptBytes += assistantTranscriptBytes(transcript)
+    this.bufferedAssistantTranscriptBytes +=
+      assistantTranscriptBytes(transcript)
     return transcript
   }
 
@@ -1769,7 +1813,11 @@ export class ProviderRuntimeIngestion {
         : transcript.content + boundedText
       const nextContentBytes = replace
         ? Buffer.byteLength(boundedText, "utf8")
-        : appendedUtf8Bytes(transcript.content, transcript.contentBytes, boundedText)
+        : appendedUtf8Bytes(
+            transcript.content,
+            transcript.contentBytes,
+            boundedText
+          )
       const remainingReasoningBytes = Math.max(
         0,
         this.assistantTranscriptMaxBytes -
@@ -1777,9 +1825,10 @@ export class ProviderRuntimeIngestion {
           transcript.toolCallsBytes
       )
       const previousReasoning = transcript.reasoning
-      const nextReasoning = transcript.reasoningBytes <= remainingReasoningBytes
-        ? previousReasoning
-        : utf8Prefix(previousReasoning, remainingReasoningBytes)
+      const nextReasoning =
+        transcript.reasoningBytes <= remainingReasoningBytes
+          ? previousReasoning
+          : utf8Prefix(previousReasoning, remainingReasoningBytes)
       transcript.content = nextContent
       transcript.contentBytes = nextContentBytes
       transcript.reasoning = nextReasoning
@@ -1800,8 +1849,14 @@ export class ProviderRuntimeIngestion {
       const boundedText = utf8Prefix(text, remainingBytes)
       transcript.reasoningBytes = replace
         ? Buffer.byteLength(boundedText, "utf8")
-        : appendedUtf8Bytes(transcript.reasoning, transcript.reasoningBytes, boundedText)
-      transcript.reasoning = replace ? boundedText : transcript.reasoning + boundedText
+        : appendedUtf8Bytes(
+            transcript.reasoning,
+            transcript.reasoningBytes,
+            boundedText
+          )
+      transcript.reasoning = replace
+        ? boundedText
+        : transcript.reasoning + boundedText
       truncated = boundedText.length !== text.length
     }
 
@@ -1847,7 +1902,11 @@ export class ProviderRuntimeIngestion {
       ? transcript.toolCalls.findIndex((call) => call.id === explicitId)
       : -1
     if (index < 0 && phase !== "started") {
-      for (let candidate = transcript.toolCalls.length - 1; candidate >= 0; candidate -= 1) {
+      for (
+        let candidate = transcript.toolCalls.length - 1;
+        candidate >= 0;
+        candidate -= 1
+      ) {
         const call = transcript.toolCalls[candidate]
         if (
           call?.state === "input-available" &&
@@ -1870,12 +1929,12 @@ export class ProviderRuntimeIngestion {
     // classification that says more than the item type is worth keeping.
     const itemType = readString(payload, "itemType", "item_type")
     const payloadKind =
-      readString(payload, "kind") ??
-      readString(asRecord(payload.data), "kind")
+      readString(payload, "kind") ?? readString(asRecord(payload.data), "kind")
     const kind =
       (payloadKind && payloadKind !== itemType ? payloadKind : undefined) ??
       existing?.kind
-    const id = explicitId ?? existing?.id ?? `tool-${transcript.toolCalls.length + 1}`
+    const id =
+      explicitId ?? existing?.id ?? `tool-${transcript.toolCalls.length + 1}`
     const now =
       readString(payload, "createdAt", "created_at", "timestamp") ??
       new Date().toISOString()
@@ -1895,7 +1954,11 @@ export class ProviderRuntimeIngestion {
         ? existing?.completedAt
         : (readString(payload, "completedAt", "completed_at") ?? now)
     const input = boundedTranscriptToolValue(
-      payload.input ?? payload.arguments ?? payload.args ?? existing?.input ?? {}
+      payload.input ??
+        payload.arguments ??
+        payload.args ??
+        existing?.input ??
+        {}
     )
     const outputSource =
       payload.output ?? payload.result ?? payload.data ?? payload.content
@@ -2141,7 +2204,11 @@ export class ProviderRuntimeIngestion {
       })
     } catch (callbackError) {
       this.options.logger.error(
-        { err: callbackError, thread: transcript.threadId, turn: transcript.turnId },
+        {
+          err: callbackError,
+          thread: transcript.threadId,
+          turn: transcript.turnId,
+        },
         "fatal transcript durability callback failed"
       )
     }
@@ -2179,7 +2246,9 @@ export class ProviderRuntimeIngestion {
       if (persisted) {
         this.dropBufferedAssistantTranscript(oldestKey, transcript)
         this.markAssistantTranscriptEvicted(oldestKey, transcript)
-      } else if (!this.spoolAssistantTranscript(oldestKey, transcript, "memory_pressure")) {
+      } else if (
+        !this.spoolAssistantTranscript(oldestKey, transcript, "memory_pressure")
+      ) {
         this.dropBufferedAssistantTranscript(oldestKey, transcript)
         this.markAssistantTranscriptEvicted(oldestKey, transcript)
         this.options.logger.error(
@@ -2276,7 +2345,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private logProviderRuntimeEvent(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     eventMeta: ReturnType<typeof providerEventMeta>,
     clients: number
   ): void {
@@ -2286,7 +2355,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private providerRuntimeLogRecord(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     eventMeta: ReturnType<typeof providerEventMeta>,
     clients: number
   ): ProviderRuntimeLogRecord | null {
@@ -2360,7 +2429,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private reasoningStartedLogRecord(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     payload: Record<string, unknown>,
     bindings: Record<string, unknown>
   ): ProviderRuntimeLogRecord | null {
@@ -2375,7 +2444,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private clearReasoningStartForEvent(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     payload: Record<string, unknown>
   ): void {
     this.loggedReasoningStarts.delete(reasoningStartKey(event, payload))
@@ -2389,16 +2458,30 @@ export class ProviderRuntimeIngestion {
   }
 
   private ingestThreadMetadata(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     strict = false
   ): boolean {
     if (event.event_type !== "thread.metadata.updated") return true
     const title = providerMetadataTitle(event.payload)
     const payload = asRecord(event.payload)
-    const metadata = payload.metadata === undefined ? payload : asRecord(payload.metadata)
+    const metadata =
+      payload.metadata === undefined ? payload : asRecord(payload.metadata)
     const hasGoal = Object.prototype.hasOwnProperty.call(metadata, "goal")
-    if (!title && !hasGoal) return true
+    // Only the backend's Autonomous Work runtime reports a run: its updates
+    // carry a mutation id and no provider (a provider's own metadata is
+    // never taken for one).
+    const hasAutonomy =
+      Object.prototype.hasOwnProperty.call(metadata, "autonomy") &&
+      typeof metadata.autonomyMutationId === "string" &&
+      providerSessionLifecycleTarget(event) === null
+    if (!title && !hasGoal && !hasAutonomy) return true
     try {
+      if (hasAutonomy) {
+        this.options.threadMetadataStore?.updateThreadAutonomy?.(
+          event.thread_id,
+          metadata.autonomy
+        )
+      }
       if (title) {
         this.options.threadMetadataStore?.updateThreadTitle(
           event.thread_id,
@@ -2426,7 +2509,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private ingestSourceProposedPlanImplementation(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     strict = false,
     broadcast = true
   ): boolean {
@@ -2499,29 +2582,32 @@ export class ProviderRuntimeIngestion {
       readString(target.payload, "createdAt", "created_at") ??
       new Date().toISOString()
     this.sequence += 1
-    const persisted = this.persistThreadActivity({
-      activity_id: sourceProposedPlanImplementedActivityId(pending),
-      thread_id: pending.sourceProposedPlan.threadId,
-      turn_id: null,
-      provider_instance_id:
-        pending.providerInstanceId ?? target.providerInstanceId ?? null,
-      kind: "turn.proposed.implemented",
-      tone: "info",
-      summary: "Plan implemented",
-      payload: {
-        sourceProposedPlan: pending.sourceProposedPlan,
-        implementationThreadId: pending.implementationThreadId,
-        implementedAt,
-        providerKind: pending.providerKind,
-        ...(pending.providerInstanceId
-          ? { providerInstanceId: pending.providerInstanceId }
-          : target.providerInstanceId
-            ? { providerInstanceId: target.providerInstanceId }
-            : {}),
+    const persisted = this.persistThreadActivity(
+      {
+        activity_id: sourceProposedPlanImplementedActivityId(pending),
+        thread_id: pending.sourceProposedPlan.threadId,
+        turn_id: null,
+        provider_instance_id:
+          pending.providerInstanceId ?? target.providerInstanceId ?? null,
+        kind: "turn.proposed.implemented",
+        tone: "info",
+        summary: "Plan implemented",
+        payload: {
+          sourceProposedPlan: pending.sourceProposedPlan,
+          implementationThreadId: pending.implementationThreadId,
+          implementedAt,
+          providerKind: pending.providerKind,
+          ...(pending.providerInstanceId
+            ? { providerInstanceId: pending.providerInstanceId }
+            : target.providerInstanceId
+              ? { providerInstanceId: target.providerInstanceId }
+              : {}),
+        },
+        sequence: this.sequence,
+        created_at: implementedAt,
       },
-      sequence: this.sequence,
-      created_at: implementedAt,
-    }, broadcast)
+      broadcast
+    )
     if (!persisted) return false
     try {
       store.ackPending(pendingKey)
@@ -2537,7 +2623,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private ingestSessionLifecycle(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     strict = false
   ): boolean {
     const target = providerSessionLifecycleTarget(event)
@@ -2574,7 +2660,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private ingestProposedPlanBuffer(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     sequence: number,
     broadcast: boolean
   ): void {
@@ -2671,7 +2757,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private consumeBufferedProposedPlanCompletion(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     sequence: number
   ): BufferedProposedPlanCompletion {
     const eventType = event.event_type
@@ -2717,7 +2803,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private restoreBufferedProposedPlan(
-    event: ProviderRuntimeEvent,
+    event: LegacyProviderEvent,
     payload: Record<string, unknown>,
     beforeSequence: number
   ): BufferedProposedPlan | null {
@@ -2761,10 +2847,7 @@ export class ProviderRuntimeIngestion {
       if (!delta) continue
       const boundedDelta = utf8Prefix(
         delta,
-        Math.max(
-          0,
-          this.proposedPlanMaxBytes - Buffer.byteLength(text, "utf8")
-        )
+        Math.max(0, this.proposedPlanMaxBytes - Buffer.byteLength(text, "utf8"))
       )
       text += boundedDelta
       truncated ||= boundedDelta.length !== delta.length
@@ -2809,7 +2892,7 @@ export class ProviderRuntimeIngestion {
   }
 
   private clearBufferedProposedPlansForSessionExit(
-    event: ProviderRuntimeEvent
+    event: LegacyProviderEvent
   ): void {
     if (
       event.event_type !== "session.exited" &&
@@ -2848,7 +2931,8 @@ export class ProviderRuntimeIngestion {
       if (key.startsWith(prefix)) this.deleteBufferedProposedPlan(key)
     }
     for (const key of this.evictedAssistantTranscriptKeys) {
-      if (key.startsWith(prefix)) this.evictedAssistantTranscriptKeys.delete(key)
+      if (key.startsWith(prefix))
+        this.evictedAssistantTranscriptKeys.delete(key)
     }
     this.activeTurnByThread.delete(threadId)
     this.evictedAssistantTurnByThread.delete(threadId)
@@ -2952,8 +3036,16 @@ function utf8Prefix(value: string, maxBytes: number): string {
 }
 
 function assistantParagraphSeparator(previous: string, next: string): string {
-  const trailing = previous.slice(-4).match(/(?:\r?\n)*$/)?.[0].match(/\n/g)?.length ?? 0
-  const leading = next.slice(0, 4).match(/^(?:\r?\n)*/)?.[0].match(/\n/g)?.length ?? 0
+  const trailing =
+    previous
+      .slice(-4)
+      .match(/(?:\r?\n)*$/)?.[0]
+      .match(/\n/g)?.length ?? 0
+  const leading =
+    next
+      .slice(0, 4)
+      .match(/^(?:\r?\n)*/)?.[0]
+      .match(/\n/g)?.length ?? 0
   return "\n".repeat(Math.max(0, 2 - trailing - leading))
 }
 
@@ -2961,11 +3053,17 @@ function isAssistantMessageBoundary(
   eventType: string,
   payload: Record<string, unknown>
 ): boolean {
-  if (eventType !== "item.completed" && eventType !== "item_completed") return false
+  if (eventType !== "item.completed" && eventType !== "item_completed")
+    return false
   const kind = (readString(payload, "itemType", "item_type", "kind") ?? "")
-    .toLowerCase().replace(/[^a-z]/g, "")
-  return kind === "assistantmessage" || kind === "agentmessage" ||
-    kind === "assistant" || payload.role === "assistant"
+    .toLowerCase()
+    .replace(/[^a-z]/g, "")
+  return (
+    kind === "assistantmessage" ||
+    kind === "agentmessage" ||
+    kind === "assistant" ||
+    payload.role === "assistant"
+  )
 }
 
 function isAssistantContentEvent(
@@ -3010,9 +3108,7 @@ function transcriptToolPhase(
     eventType === "item.completed" ||
     eventType === "item_completed"
   ) {
-    return readString(payload, "error", "errorMessage")
-      ? "failed"
-      : "completed"
+    return readString(payload, "error", "errorMessage") ? "failed" : "completed"
   }
   if (
     eventType === "tool_call" ||
@@ -3033,7 +3129,9 @@ function boundedTranscriptToolValue(value: unknown): unknown {
   } catch {
     serialized = String(value ?? "")
   }
-  if (Buffer.byteLength(serialized, "utf8") <= MAX_TRANSCRIPT_TOOL_VALUE_BYTES) {
+  if (
+    Buffer.byteLength(serialized, "utf8") <= MAX_TRANSCRIPT_TOOL_VALUE_BYTES
+  ) {
     return value
   }
   const suffix = "\n[tool value truncated]"
@@ -3072,11 +3170,7 @@ function persistedTranscriptToolCalls(
       state,
       ...(readString(record, "providerKind", "provider_kind")
         ? {
-            providerKind: readString(
-              record,
-              "providerKind",
-              "provider_kind"
-            ),
+            providerKind: readString(record, "providerKind", "provider_kind"),
           }
         : {}),
       ...(readString(record, "providerInstanceId", "provider_instance_id")
@@ -3167,7 +3261,7 @@ function terminalTurnStatus(eventType: string): string {
   }
 }
 
-function providerEventMeta(event: ProviderRuntimeEvent): {
+function providerEventMeta(event: LegacyProviderEvent): {
   readonly event_type: string
   readonly thread: string
 } {
@@ -3188,7 +3282,7 @@ function journalEntryMeta(entry: ProviderRuntimeJournalEntry): {
 }
 
 function failureSourceOfLegacy(
-  event: ProviderRuntimeEvent
+  event: LegacyProviderEvent
 ): ProviderRuntimeFailureSource {
   const payload = asRecord(event.payload)
   return {
@@ -3219,7 +3313,7 @@ function failureSourceOfEntry(
 }
 
 function providerRuntimeLogBindings(
-  event: ProviderRuntimeEvent,
+  event: LegacyProviderEvent,
   eventMeta: ReturnType<typeof providerEventMeta>,
   payload: Record<string, unknown>,
   clients: number
@@ -3243,10 +3337,13 @@ function providerRuntimeLogBindings(
 }
 
 function reasoningStartKey(
-  event: ProviderRuntimeEvent,
+  event: LegacyProviderEvent,
   payload: Record<string, unknown>
 ): string {
-  return assistantTranscriptKey(event.thread_id, readString(payload, "turn_id", "turnId") ?? "__thread__")
+  return assistantTranscriptKey(
+    event.thread_id,
+    readString(payload, "turn_id", "turnId") ?? "__thread__"
+  )
 }
 
 function isToolishProviderEvent(
@@ -3266,9 +3363,9 @@ function isToolishProviderEvent(
     .toLowerCase()
   return Boolean(
     itemType &&
-      ["tool", "command", "file", "search", "read", "write", "patch"].some(
-        (part) => itemType.includes(part)
-      )
+    ["tool", "command", "file", "search", "read", "write", "patch"].some(
+      (part) => itemType.includes(part)
+    )
   )
 }
 
@@ -3293,7 +3390,7 @@ function providerMetadataUpdatedAt(payload: unknown): string | undefined {
 }
 
 function proposedPlanBufferKey(
-  event: ProviderRuntimeEvent,
+  event: LegacyProviderEvent,
   payload: Record<string, unknown>
 ): string | null {
   const planKey =
@@ -3301,11 +3398,9 @@ function proposedPlanBufferKey(
     readString(payload, "turn_id", "turnId") ??
     readString(payload, "itemId", "item_id") ??
     "__thread__"
-  return planKey.length > 0 ? assistantTranscriptKey(event.thread_id, planKey) : null
-}
-
-function compactProvider(value: string | undefined): string {
-  return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "")
+  return planKey.length > 0
+    ? assistantTranscriptKey(event.thread_id, planKey)
+    : null
 }
 
 function providerKindFromPayload(
@@ -3344,10 +3439,7 @@ function sourcePlanImplementationMatches(
   ) {
     return false
   }
-  if (
-    input.acceptedTurnId &&
-    pending.acceptedTurnId !== input.acceptedTurnId
-  ) {
+  if (input.acceptedTurnId && pending.acceptedTurnId !== input.acceptedTurnId) {
     return false
   }
   if (
@@ -3361,19 +3453,9 @@ function sourcePlanImplementationMatches(
   return true
 }
 
+/** Pending and incoming kinds compare through the shared alias table. */
 function pendingProviderKindKey(value: string): string {
-  const key = compactProvider(value)
-  switch (key) {
-    case "codexcli":
-      return "codex_cli"
-    case "claudeagent":
-    case "claudecli":
-      return "claude"
-    case "anthropiccli":
-      return "anthropic_cli"
-    default:
-      return key
-  }
+  return canonicalProviderKindAlias(value) ?? compactProviderAlias(value)
 }
 
 interface ProviderSessionLifecycleTarget {
@@ -3386,7 +3468,7 @@ interface ProviderSessionLifecycleTarget {
 }
 
 function providerSessionLifecycleTarget(
-  event: ProviderRuntimeEvent
+  event: LegacyProviderEvent
 ): ProviderSessionLifecycleTarget | null {
   const payload = asRecord(event.payload)
   const providerKind = providerKindFromPayload(payload)
@@ -3406,7 +3488,7 @@ function providerSessionLifecycleTarget(
 }
 
 function providerSessionLifecycle(
-  event: ProviderRuntimeEvent,
+  event: LegacyProviderEvent,
   target: ProviderSessionLifecycleTarget,
   current: ProviderRuntimeSessionLifecycleSnapshot | null
 ):
@@ -3519,7 +3601,7 @@ interface ProviderDispatchTerminalProjection {
 }
 
 function providerDispatchTerminalProjection(
-  event: ProviderRuntimeEvent
+  event: LegacyProviderEvent
 ): ProviderDispatchTerminalProjection | null {
   const eventType = event.event_type.trim().toLowerCase()
   // A failed tool or status update does not settle its enclosing turn.
@@ -3544,7 +3626,9 @@ function providerDispatchTerminalProjection(
   )?.toLowerCase()
   const error =
     readString(payload, "error", "errorMessage", "message", "reason") ??
-    (status ? `Provider turn ended with status '${status}'.` : "Provider turn failed.")
+    (status
+      ? `Provider turn ended with status '${status}'.`
+      : "Provider turn failed.")
   if (
     status === "failed" ||
     status === "error" ||
@@ -3664,12 +3748,20 @@ function sessionStatusFromRuntimeState(
 
 function isSqliteContention(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
-  return typeof code === "string" && /^(SQLITE_BUSY|SQLITE_LOCKED)(_|$)/.test(code)
+  return (
+    typeof code === "string" && /^(SQLITE_BUSY|SQLITE_LOCKED)(_|$)/.test(code)
+  )
 }
 
-function appendedUtf8Bytes(previous: string, previousBytes: number, delta: string): number {
+function appendedUtf8Bytes(
+  previous: string,
+  previousBytes: number,
+  delta: string
+): number {
   // A surrogate pair split across provider deltas encodes to four bytes, not
   // the six replacement-character bytes counted by the fragments separately.
-  const joinsPair = /[\uD800-\uDBFF]$/.test(previous.slice(-1)) && /^[\uDC00-\uDFFF]/.test(delta)
+  const joinsPair =
+    /[\uD800-\uDBFF]$/.test(previous.slice(-1)) &&
+    /^[\uDC00-\uDFFF]/.test(delta)
   return previousBytes + Buffer.byteLength(delta, "utf8") - (joinsPair ? 2 : 0)
 }

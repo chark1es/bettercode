@@ -3,26 +3,9 @@
  * canonical item flattening, usage and request kinds. Pure; no store access.
  */
 
-import {
-  asRecord,
-  readString,
-} from "@betterc0de/schema"
+import { asRecord, readString } from "@betterc0de/schema"
 import { deriveProviderToolActivityPresentation } from "@betterc0de/schema/tool-activity"
-
-function compactProvider(value: string | undefined): string {
-  return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "")
-}
-
-function providerKindFromDriver(value: string | undefined): string | undefined {
-  const key = compactProvider(value)
-  if (!key) return undefined
-  if (key === "codex" || key === "codexcli") return "codex"
-  if (key === "claude" || key === "claudeagent" || key === "claudecli") {
-    return "claude"
-  }
-  if (key === "anthropiccli") return "anthropic_cli"
-  return value
-}
+import { providerKindFromDriver } from "@betterc0de/schema/provider-kind"
 
 export function payloadTurnId(payload: Record<string, unknown>) {
   return readString(payload, "turn_id", "turnId")
@@ -59,7 +42,9 @@ export function providerKindFromPayload(payload: Record<string, unknown>) {
   )
 }
 
-export function providerInstanceIdFromPayload(payload: Record<string, unknown>) {
+export function providerInstanceIdFromPayload(
+  payload: Record<string, unknown>
+) {
   return readString(payload, "providerInstanceId", "provider_instance_id")
 }
 
@@ -244,7 +229,9 @@ export function toolUpdateActivityKey(
   return isCumulativeToolOutputPayload(payload) ? toolId : sequence
 }
 
-export function outputDetail(payload: Record<string, unknown>): string | undefined {
+export function outputDetail(
+  payload: Record<string, unknown>
+): string | undefined {
   return truncateDetail(
     readString(
       payload,

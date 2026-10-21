@@ -1,8 +1,18 @@
 import { useState } from "react"
 import { DownloadIcon, ImageIcon, PaperclipIcon } from "lucide-react"
-import { readBrowserElementAttachment, type ChatAttachment } from "@betterc0de/schema"
+import {
+  readBrowserElementAttachment,
+  type ChatAttachment,
+  type ChatMessageAttachment,
+} from "@betterc0de/schema"
 import { cn } from "@/lib/utils"
 import { BrowserElementChips } from "@/components/chat/browser-element-chips"
+import { FullPayloadStatus } from "@/components/chat/full-payload-status"
+import {
+  useFullMessagePayload,
+  type FullMessageSource,
+} from "@/hooks/use-full-message-payload"
+import { attachmentDataOmitted } from "@/lib/chat/message-payloads"
 import {
   Dialog,
   DialogContent,
@@ -66,7 +76,9 @@ export function AttachmentPreviewDialog({
       {/* A fixed stage of three quarters of the screen; the image scales to
           fill it, so a small screenshot is as readable as a large one. */}
       <DialogContent
-        aria-label={preview ? `Preview of ${preview.label}` : "Attachment preview"}
+        aria-label={
+          preview ? `Preview of ${preview.label}` : "Attachment preview"
+        }
         className="h-[75vh] w-[75vw] max-w-none grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:max-w-none"
       >
         <div className="flex min-w-0 items-center gap-3 pr-12">
@@ -112,14 +124,19 @@ const chipClassName =
 /**
  * The attachment chips under a user message. Page-element references render
  * as their own chips; images open the large preview on click; every other
- * file opens as a link.
+ * file opens as a link. An attachment a light transcript page left without
+ * its data shows as an inert chip while the full message (`source`) is read.
  */
 export function MessageAttachments({
   attachments,
+  source,
 }: {
-  attachments: readonly ChatAttachment[]
+  attachments: readonly ChatMessageAttachment[]
+  source?: FullMessageSource | null
 }) {
   const [preview, setPreview] = useState<AttachmentPreview | null>(null)
+  const dataPending = attachments.some(attachmentDataOmitted)
+  const fullData = useFullMessagePayload(source, dataPending)
   if (attachments.length === 0) return null
 
   // No bottom margin: MessageContent is a flex column with its own gap, and
@@ -130,19 +147,35 @@ export function MessageAttachments({
       {attachments.map((attachment, index) => {
         const element = readBrowserElementAttachment(attachment)
         if (element)
-          return <BrowserElementChips key={`element-${index}`} elements={[element]} />
+          return (
+            <BrowserElementChips
+              key={`element-${index}`}
+              elements={[element]}
+            />
+          )
         const mediaType = attachment.mediaType?.trim() || "file"
         const isImage = isPreviewableImage(attachment)
+        const omitted = attachmentDataOmitted(attachment)
         const label = attachmentLabel(attachment, index)
-        const size = formatAttachmentSize(attachment)
+        const size = omitted ? null : formatAttachmentSize(attachment)
         const meta = size ? `${mediaType} · ${size}` : mediaType
         const key = `${attachment.url.slice(0, 48)}-${index}`
         const body = (
           <>
             {isImage ? (
               <span className="relative grid size-8 shrink-0 place-items-center overflow-hidden rounded border border-border/45 bg-background/80">
-                <img alt="" className="size-full object-cover" src={attachment.url} />
-                <ImageIcon className="absolute size-3 text-muted-foreground opacity-0 group-hover:opacity-100" />
+                {omitted ? (
+                  <ImageIcon className="size-3.5 text-muted-foreground" />
+                ) : (
+                  <>
+                    <img
+                      alt=""
+                      className="size-full object-cover"
+                      src={attachment.url}
+                    />
+                    <ImageIcon className="absolute size-3 text-muted-foreground opacity-0 group-hover:opacity-100" />
+                  </>
+                )}
               </span>
             ) : (
               <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -155,6 +188,18 @@ export function MessageAttachments({
             </span>
           </>
         )
+        if (omitted) {
+          // Nothing to open yet: the data arrives with the full message.
+          return (
+            <span
+              key={key}
+              aria-busy={fullData.status === "loading"}
+              className={cn(chipClassName, "cursor-default hover:bg-muted/35")}
+            >
+              {body}
+            </span>
+          )
+        }
         return isImage ? (
           <button
             key={key}
@@ -178,7 +223,18 @@ export function MessageAttachments({
           </a>
         )
       })}
-      <AttachmentPreviewDialog preview={preview} onClose={() => setPreview(null)} />
+      {dataPending && (
+        <FullPayloadStatus
+          status={fullData.status}
+          onRetry={fullData.retry}
+          subject="attachment"
+          className="basis-full"
+        />
+      )}
+      <AttachmentPreviewDialog
+        preview={preview}
+        onClose={() => setPreview(null)}
+      />
     </div>
   )
 }

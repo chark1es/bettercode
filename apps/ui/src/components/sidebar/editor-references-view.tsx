@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react"
 import {
   FileSearchIcon,
   PencilLineIcon,
@@ -23,7 +29,7 @@ import {
   searchContentDetailed,
   type WorkspaceContentSearchMatch,
   type WorkspaceContentSearchResult,
-} from "@/services/backend"
+} from "@/services/backend/workspaceApi"
 import { SearchTruncationNotice } from "@/components/search-truncation-notice"
 import { relativeEditorPath } from "@/lib/editor-path"
 import { openSourceTarget } from "@/lib/source-opener"

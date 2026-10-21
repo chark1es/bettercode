@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils"
 import { createLogger } from "@/lib/logger"
 import { Badge } from "@/components/ui/badge"
 import { ForkIntoRepoBadge } from "@/components/chat/fork-into-repo-badge"
+import { ThreadPullRequestChip } from "@/components/pull-requests/thread-pull-request-chip"
 import { ProviderIcon } from "@/components/provider-icon"
 import type { UiProvider } from "@/lib/provider-types"
 
@@ -41,8 +42,9 @@ import {
   gitStatus,
   isGitRepo,
   openInEditor,
-  pickFolder,
-} from "@/services/backend"
+} from "@/services/backend/gitApi"
+import { pickFolder } from "@/services/backend/runtime"
+import { runThreadAction } from "@/lib/thread-confirm"
 
 /**
  * The thin toolbar that sits above the chat messages (or in side-panel mode,
@@ -119,7 +121,8 @@ export function ChatToolbar({
   const providerLabel = selectedProvider?.name ?? selectedProvider?.id
 
   // The project path — NEVER "." (which would be the IDE itself)
-  const cwd = thread?.worktreePath?.trim() || thread?.projectPath?.trim() || null
+  const cwd =
+    thread?.worktreePath?.trim() || thread?.projectPath?.trim() || null
 
   // Installed external tools for the "Open In" menu (shared cache with
   // the right panel's header menu).
@@ -188,11 +191,7 @@ export function ChatToolbar({
   }, [cwd])
 
   const confirmGitMutation = useCallback(
-    (input: {
-      title: string
-      description: string
-      action: () => void
-    }) => {
+    (input: { title: string; description: string; action: () => void }) => {
       if (onConfirm) {
         onConfirm(input)
         return
@@ -247,7 +246,8 @@ export function ChatToolbar({
               try {
                 await gitInit(cwd)
                 refreshGit()
-                const { gitListRemotes } = await import("@/services/backend")
+                const { gitListRemotes } =
+                  await import("@/services/backend/gitApi")
                 const remotes = await gitListRemotes(cwd)
                 if (remotes.length === 0) setShowRemoteInput(true)
               } catch {
@@ -262,7 +262,7 @@ export function ChatToolbar({
         {isGit && gitDirty && (
           <Badge
             variant="outline"
-            className="shrink-0 gap-1.5 border-transparent bg-amber-500/10 py-0.5 text-xs tabular-nums text-amber-600 dark:text-amber-400"
+            className="shrink-0 gap-1.5 border-transparent bg-amber-500/10 py-0.5 text-xs text-amber-600 tabular-nums dark:text-amber-400"
           >
             <span className="size-1.5 rounded-full bg-current" aria-hidden />
             {gitChanges} change{gitChanges !== 1 ? "s" : ""}
@@ -277,6 +277,7 @@ export function ChatToolbar({
             Clean
           </Badge>
         )}
+        {isGit && <ThreadPullRequestChip threadId={thread.id} />}
         {showRemoteInput && (
           <div className="flex items-center gap-1">
             <input
@@ -300,7 +301,7 @@ export function ChatToolbar({
                     setAddingRemote(true)
                     try {
                       const { gitAddRemote } =
-                        await import("@/services/backend")
+                        await import("@/services/backend/gitApi")
                       await gitAddRemote(cwd, "origin", requestedRemote)
                       await gitPush(cwd)
                       setShowRemoteInput(false)
@@ -421,7 +422,8 @@ export function ChatToolbar({
                 try {
                   await gitInit(cwd)
                   refreshGit()
-                  const { gitListRemotes } = await import("@/services/backend")
+                  const { gitListRemotes } =
+                    await import("@/services/backend/gitApi")
                   const remotes = await gitListRemotes(cwd)
                   if (remotes.length === 0) setShowRemoteInput(true)
                 } catch {
@@ -455,7 +457,7 @@ export function ChatToolbar({
                         setAddingRemote(true)
                         try {
                           const { gitAddRemote } =
-                            await import("@/services/backend")
+                            await import("@/services/backend/gitApi")
                           await gitAddRemote(cwd, "origin", requestedRemote)
                           await gitPush(cwd)
                           setShowRemoteInput(false)
@@ -486,7 +488,7 @@ export function ChatToolbar({
         {isGit && gitDirty && (
           <Badge
             variant="outline"
-            className="shrink-0 gap-1.5 border-transparent bg-amber-500/10 py-0.5 text-xs tabular-nums text-amber-600 dark:text-amber-400"
+            className="shrink-0 gap-1.5 border-transparent bg-amber-500/10 py-0.5 text-xs text-amber-600 tabular-nums dark:text-amber-400"
           >
             <span className="size-1.5 rounded-full bg-current" aria-hidden />
             {gitChanges} change{gitChanges !== 1 ? "s" : ""}
@@ -576,8 +578,8 @@ export function ChatToolbar({
                   .getState()
                   .threads.find((t) => t.id === thread.id)
                 if (updated) {
-                  import("@/services/backend").then(({ upsertThreadMeta }) =>
-                    upsertThreadMeta(updated)
+                  import("@/services/backend/coreApi").then(
+                    ({ upsertThreadMeta }) => upsertThreadMeta(updated)
                   )
                 }
               }
@@ -728,6 +730,7 @@ export function ChatToolbar({
               <ArrowUpIcon className="size-3.5" />
               Push
             </Button>
+            <ThreadPullRequestChip threadId={thread.id} />
           </>
         )}
 
@@ -779,12 +782,17 @@ export function ChatToolbar({
             <DropdownMenuItem
               variant="destructive"
               onClick={() =>
-                onConfirm?.({
-                  title: "Delete chat?",
-                  description:
-                    "This chat and all its messages will be permanently deleted.",
-                  action: () => useChatStore.getState().deleteThread(thread.id),
-                })
+                runThreadAction(
+                  "delete",
+                  {
+                    title: "Delete chat?",
+                    description:
+                      "This chat and all its messages will be permanently deleted.",
+                    action: () =>
+                      useChatStore.getState().deleteThread(thread.id),
+                  },
+                  onConfirm
+                )
               }
             >
               <Trash2Icon className="size-3.5" /> Delete
