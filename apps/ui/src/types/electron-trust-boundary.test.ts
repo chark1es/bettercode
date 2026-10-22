@@ -4,13 +4,16 @@ import { createRequire } from "node:module"
 import fs from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
+import { httpContracts } from "@betterc0de/schema/http-contracts"
 import { describe, expect, it } from "vitest"
 
 const requireCjs = createRequire(import.meta.url)
-const { buildRuntimeConfigScript } = requireCjs(
+const { buildRuntimeConfig } = requireCjs(
   "../../../shell/shared/runtimeConfig.cjs"
 ) as {
-  buildRuntimeConfigScript: (config: Record<string, unknown>) => string
+  buildRuntimeConfig: (
+    config: Record<string, unknown>
+  ) => Record<string, unknown>
 }
 const {
   assertTrustedIpcSender,
@@ -42,8 +45,14 @@ const {
 
 describe("Electron renderer trust boundary", () => {
   it("allows issued HTML preview URL shapes without allowing raw local files", () => {
-    expect(isAllowedWebviewUrl("betterc0de-html://28c28eaf-00a7-45c8-91c2-75957ab2ed68/pages/index.html")).toBe(true)
-    expect(isAllowedWebviewUrl("betterc0de-html://arbitrary/path.html")).toBe(false)
+    expect(
+      isAllowedWebviewUrl(
+        "betterc0de-html://28c28eaf-00a7-45c8-91c2-75957ab2ed68/pages/index.html"
+      )
+    ).toBe(true)
+    expect(isAllowedWebviewUrl("betterc0de-html://arbitrary/path.html")).toBe(
+      false
+    )
     expect(isAllowedWebviewUrl("file:///C:/private/index.html")).toBe(false)
     expect(isAllowedWebviewUrl("javascript:alert(1)")).toBe(false)
     expect(isAllowedWebviewUrl("http://localhost:3000")).toBe(true)
@@ -56,7 +65,9 @@ describe("Electron renderer trust boundary", () => {
   // authenticated backend, which owns the policy.
   it("exposes no main-process provider bridge to the renderer", () => {
     const shellDir = path.resolve(import.meta.dirname, "../../../shell")
-    expect(fs.existsSync(path.join(shellDir, "claude-provider.cjs"))).toBe(false)
+    expect(fs.existsSync(path.join(shellDir, "claude-provider.cjs"))).toBe(
+      false
+    )
     expect(fs.existsSync(path.join(shellDir, "claude-ipc.cjs"))).toBe(false)
 
     const preload = fs.readFileSync(path.join(shellDir, "preload.cjs"), "utf8")
@@ -70,8 +81,9 @@ describe("Electron renderer trust boundary", () => {
       path.resolve(import.meta.dirname, "../../../shell/preload.cjs"),
       "utf8"
     )
-    const mainSource = fs.readFileSync(
-      path.resolve(import.meta.dirname, "../../../shell/main.cjs"),
+    // The app-level IPC handlers moved out of main.cjs into shared/app-ipc.cjs.
+    const appIpcSource = fs.readFileSync(
+      path.resolve(import.meta.dirname, "../../../shell/shared/app-ipc.cjs"),
       "utf8"
     )
     const workspaceApiSource = fs.readFileSync(
@@ -79,20 +91,34 @@ describe("Electron renderer trust boundary", () => {
       "utf8"
     )
 
-    expect(preloadSource).toContain("navigator.userActivation?.isActive")
+    // The main process decides (approved hook command, or real input to the
+    // window it observes itself); the preload no longer gates on
+    // `navigator.userActivation`, which expired before automatic hooks ran.
+    expect(preloadSource).not.toContain("navigator.userActivation")
     expect(preloadSource).toContain('ipcRenderer.invoke("shell:capability"')
-    expect(mainSource).toContain('"X-BetterC0de-Human-Capability": serverToken')
-    expect(mainSource).toContain("/api/v1/shell/capability")
-    expect(mainSource).not.toMatch(
+    expect(appIpcSource).toContain(
+      "isShellCapabilityAuthorized(event, scope, {"
+    )
+    expect(appIpcSource).toContain(
+      '"X-BetterC0de-Human-Capability": serverToken'
+    )
+    expect(appIpcSource).toContain("/api/v1/shell/capability")
+    expect(appIpcSource).not.toMatch(
       /127\.0\.0\.1:\$\{serverPort\}\/api\/shell\/capability/
     )
     expect(workspaceApiSource).toContain(
       "window.electronAPI?.requestShellCapability"
     )
     expect(workspaceApiSource).toContain("if (!isRemoteRuntime())")
+    // A paired device mints through the typed shell contract, which pins the
+    // route it calls to `POST /shell/capability`.
     expect(workspaceApiSource).toMatch(
-      /httpInvoke<[^>]+>\(\s*["']\/shell\/capability/
+      /invokeContract\(\s*["']shellCapability["']/
     )
+    expect(httpContracts.shellCapability).toMatchObject({
+      method: "POST",
+      path: "/shell/capability",
+    })
     // A paired device asks the backend every time and, when refused, is told
     // which desktop switch grants it — it never decides locally.
     expect(workspaceApiSource).toContain("Allow terminal from remote devices")
@@ -109,18 +135,34 @@ describe("Electron renderer trust boundary", () => {
     // route refuses anything.
   })
 
-  it("never exposes the backend bearer in runtime JavaScript", () => {
+  it("never exposes the backend bearer in the renderer runtime config", () => {
     const secret = "must-not-reach-renderer"
-    const script = buildRuntimeConfigScript({
+    const config = buildRuntimeConfig({
       port: 3773,
       token: secret,
       electronPath: "C:/app/apps/shell",
       previewPartition: "betterc0de-preview",
     })
 
-    expect(script).not.toContain(secret)
-    expect(script).not.toContain('"token"')
-    expect(script).toContain('"previewPartition":"betterc0de-preview"')
+    expect(JSON.stringify(config)).not.toContain(secret)
+    expect(config).not.toHaveProperty("token")
+    expect(config).toEqual({
+      port: 3773,
+      mode: "local_sidecar",
+      electronPath: "C:/app/apps/shell",
+      previewPartition: "betterc0de-preview",
+    })
+  })
+
+  it("delivers runtime config over IPC instead of injecting page JavaScript", () => {
+    const shellDir = path.resolve(import.meta.dirname, "../../../shell")
+    const mainSource = fs.readFileSync(path.join(shellDir, "main.cjs"), "utf8")
+    const preloadSource = fs.readFileSync(
+      path.join(shellDir, "preload.cjs"),
+      "utf8"
+    )
+    expect(mainSource).not.toContain("executeJavaScript(")
+    expect(preloadSource).toContain('ipcRenderer.invoke("runtime:config")')
   })
 
   it("authenticates only a registered app main frame, never a preview guest", () => {

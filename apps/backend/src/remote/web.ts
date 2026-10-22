@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import fs, { type Stats } from "node:fs"
 import type { FileHandle } from "node:fs/promises"
 import { Readable } from "node:stream"
@@ -57,19 +58,57 @@ function isFile(filePath: string): boolean {
   }
 }
 
-function runtimeScript(config: ServerConfig): string {
+function runtimeScript(config: ServerConfig, nonce: string): string {
   const payload = JSON.stringify({
     port: config.port,
     mode: "remote_http",
   }).replace(/</g, "\\u003c")
-  return `<script>window.__BETTERC0DE__={...${payload},baseUrl:window.location.origin};</script>`
+  return `<script nonce="${nonce}">window.__BETTERC0DE__={...${payload},baseUrl:window.location.origin};</script>`
 }
 
-function injectRuntimeConfig(indexHtml: string, config: ServerConfig): string {
-  const script = runtimeScript(config)
-  return indexHtml.includes("</head>")
-    ? indexHtml.replace("</head>", `${script}\n  </head>`)
-    : `${script}${indexHtml}`
+const CSP_META_RE =
+  /(<meta\s+http-equiv=["']Content-Security-Policy["']\s+content=")([^"]*)(")/gi
+
+/**
+ * Allow exactly the script carrying `nonce` in a policy: the nonce is added
+ * to `script-src` (or to `default-src` when the policy has no `script-src`).
+ * Everything else in the policy, including the absence of `'unsafe-inline'`,
+ * is left as it is.
+ */
+export function addScriptNonceToPolicy(policy: string, nonce: string): string {
+  const directives = policy.split(";")
+  const nonceSource = `'nonce-${nonce}'`
+  for (const name of ["script-src", "default-src"]) {
+    const index = directives.findIndex(
+      (directive) => directive.trim().split(/\s+/)[0]?.toLowerCase() === name
+    )
+    if (index < 0) continue
+    directives[index] = `${directives[index]!.trimEnd()} ${nonceSource}`
+    return directives.join(";")
+  }
+  return policy
+}
+
+/**
+ * Inject the runtime config as an inline script with a fresh nonce, and add
+ * that nonce to the page's Content-Security-Policy meta tags. The bundle's
+ * policy allows no inline script (apps/ui/index.html); only this one, for
+ * this response, is let through.
+ */
+export function injectRuntimeConfig(
+  indexHtml: string,
+  config: ServerConfig,
+  nonce: string = randomBytes(16).toString("base64")
+): string {
+  const script = runtimeScript(config, nonce)
+  const withNonce = indexHtml.replace(
+    CSP_META_RE,
+    (_match, start: string, policy: string, end: string) =>
+      `${start}${addScriptNonceToPolicy(policy, nonce)}${end}`
+  )
+  return withNonce.includes("</head>")
+    ? withNonce.replace("</head>", `${script}\n  </head>`)
+    : `${script}${withNonce}`
 }
 
 /**
@@ -169,11 +208,7 @@ async function openRegularFileNoFollow(
   let handle: FileHandle | null = null
   try {
     const before = await fs.promises.lstat(filePath)
-    if (
-      before.isSymbolicLink()
-      || !before.isFile()
-      || before.size > maxBytes
-    ) {
+    if (before.isSymbolicLink() || !before.isFile() || before.size > maxBytes) {
       return null
     }
     handle = await fs.promises.open(
@@ -182,9 +217,9 @@ async function openRegularFileNoFollow(
     )
     const opened = await handle.stat()
     if (
-      !opened.isFile()
-      || opened.size > maxBytes
-      || !sameFileIdentity(before, opened)
+      !opened.isFile() ||
+      opened.size > maxBytes ||
+      !sameFileIdentity(before, opened)
     ) {
       await handle.close()
       return null
@@ -202,20 +237,14 @@ function sameFileIdentity(left: Stats, right: Stats): boolean {
   // still protect against a replacement while avoiding false 404s for valid
   // static assets.
   if (process.platform === "win32") {
-    return (
-      left.size === right.size &&
-      left.mtimeMs === right.mtimeMs
-    )
+    return left.size === right.size && left.mtimeMs === right.mtimeMs
   }
   if (left.ino !== 0 || right.ino !== 0) {
-    return (
-      left.ino === right.ino
-      && left.dev === right.dev
-    )
+    return left.ino === right.ino && left.dev === right.dev
   }
   return (
-    left.size === right.size
-    && left.birthtimeMs === right.birthtimeMs
-    && left.mtimeMs === right.mtimeMs
+    left.size === right.size &&
+    left.birthtimeMs === right.birthtimeMs &&
+    left.mtimeMs === right.mtimeMs
   )
 }

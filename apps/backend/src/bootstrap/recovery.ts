@@ -4,8 +4,9 @@ import {
   ProviderRuntimeJournalReplayer,
   providerRuntimeJournalRecoveryBlocksStartup,
 } from "../provider/runtime"
-import { providerEventBus } from "../provider/events"
 import { initializeThreadGoals } from "../services/chat/goal-runtime"
+import { initializeThreadAutonomy } from "../services/chat/autonomy-runtime"
+import { initializeChatResume } from "../services/chat/resume-runtime"
 import { ProviderRuntimeIngestion } from "../provider/runtime/ProviderRuntimeIngestion"
 import { recoverPendingCheckpointReverts } from "../services/checkpoint-revert-saga"
 import { withCheckpointRecoveryMutation } from "../http/checkpointRecoveryFence"
@@ -33,7 +34,7 @@ export function recoverProviderRuntime(
   providers: ProvidersContext,
   hub: WsHub
 ): RecoveryContext {
-  const { startupCleanup } = root
+  const { startupCleanup, eventBus } = root
   const { taintBackend } = root.taint
   const {
     eventStore,
@@ -50,8 +51,9 @@ export function recoverProviderRuntime(
   const providerRuntimeEventJournal = new ProviderRuntimeEventJournal(
     eventStore
   )
-  const providerRuntimeSpoolReplay =
-    providerRuntimeJournalRecoveryStore.replay(providerRuntimeEventJournal)
+  const providerRuntimeSpoolReplay = providerRuntimeJournalRecoveryStore.replay(
+    providerRuntimeEventJournal
+  )
   if (
     providerRuntimeSpoolReplay.replayed > 0 ||
     providerRuntimeSpoolReplay.quarantined > 0 ||
@@ -62,16 +64,14 @@ export function recoverProviderRuntime(
       "provider runtime journal filesystem recovery completed"
     )
   }
-  if (
-    providerRuntimeJournalRecoveryBlocksStartup(providerRuntimeSpoolReplay)
-  ) {
+  if (providerRuntimeJournalRecoveryBlocksStartup(providerRuntimeSpoolReplay)) {
     throw new Error(
       `Provider runtime journal recovery is blocked by ${providerRuntimeSpoolReplay.pending} pending and ${providerRuntimeSpoolReplay.quarantined} quarantined record(s).`
     )
   }
 
   const providerRuntimeIngestion = new ProviderRuntimeIngestion({
-    eventBus: providerEventBus,
+    eventBus,
     eventJournal: providerRuntimeEventJournal,
     journalRecoveryStore: providerRuntimeJournalRecoveryStore,
     projectionReceipts: providerRuntimeProjectionReceipts,
@@ -95,7 +95,7 @@ export function recoverProviderRuntime(
     // event only after ingestion has processed it — journaled first whenever
     // journaling applies (auto-save off and transcript-lane deltas are the
     // cases where it does not), never before the journal saw it.
-    projectedSink: (event) => providerEventBus.emitProjected(event),
+    projectedSink: (event) => eventBus.emitProjected(event),
   })
 
   // Startup checkpoint recovery emits canonical runtime diff events. Wire
@@ -148,8 +148,7 @@ export function recoverProviderRuntime(
       "provider runtime journal startup replay skipped the rest of a thread at a row that could not be projected; other threads were replayed, continuing startup, the row is retried on the next start"
     )
   }
-  const abandonedSourcePlanLinks =
-    sourceProposedPlanImplementations.clearAll()
+  const abandonedSourcePlanLinks = sourceProposedPlanImplementations.clearAll()
   if (abandonedSourcePlanLinks > 0) {
     logger.warn(
       { abandonedSourcePlanLinks },
@@ -178,8 +177,15 @@ export function recoverProviderRuntime(
       "cleared stale provider session lifecycle state after backend restart"
     )
   }
-  const stopGoals = initializeThreadGoals(providers.state)
+  const stopGoals = initializeThreadGoals(providers.state, eventBus)
   startupCleanup.push({ name: "thread goals", run: stopGoals })
+  const stopAutonomy = initializeThreadAutonomy(providers.state, eventBus)
+  startupCleanup.push({ name: "thread autonomy", run: stopAutonomy })
+  // Chats that resume by themselves after a usage limit, or once after a
+  // quit or crash cut their turn off. After replay, like the schedulers
+  // above, so it continues only what this boot found interrupted.
+  const stopChatResume = initializeChatResume(providers.state, eventBus)
+  startupCleanup.push({ name: "chat resume", run: stopChatResume })
   return { providerRuntimeIngestion }
 }
 

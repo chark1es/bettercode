@@ -38,7 +38,7 @@ import {
   searchContentDetailed,
   type WorkspaceContentSearchMatch,
   type WorkspaceContentSearchResult,
-} from "@/services/backend"
+} from "@/services/backend/workspaceApi"
 
 const SEARCH_RESULT_LIMIT = 500
 
@@ -243,10 +243,7 @@ export function EditorSearchSidebarView({
     Number(Boolean(includePattern.trim())) +
     Number(Boolean(excludePattern.trim()))
   const canReplace =
-    !replacing &&
-    !loading &&
-    trimmedQuery.length >= 2 &&
-    results.length > 0
+    !replacing && !loading && trimmedQuery.length >= 2 && results.length > 0
 
   return (
     <section

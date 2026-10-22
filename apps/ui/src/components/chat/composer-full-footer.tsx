@@ -13,12 +13,13 @@ import { cn } from "@/lib/utils"
 import { chatModeLabel } from "@/lib/chat-mode-labels"
 import type { ComposerFooterProps } from "./chat-composer-types"
 import { ComposerOrchestrationMenu } from "./composer-orchestration"
+import { ComposerCompareHint, useComposerCompare } from "./composer-compare"
 import {
   SimpleDropdown,
   SimpleDropdownSubItem,
-  SimpleDropdownSeparator,
 } from "@/components/ui/simple-dropdown"
 import { ProviderIcon } from "@/components/provider-icon"
+import { modelIconProvider } from "@/lib/model-vendor-logo"
 import { SimpleContextIndicator } from "@/components/chat/simple-context-indicator"
 import { VoiceInputControl } from "@/components/chat/voice-input-control"
 import { ComposerSubmit } from "@/components/chat/composer-submit"
@@ -101,8 +102,6 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
     setPermissionLevel,
     setContextWindow,
     selectedProvider,
-    selectedProviderId,
-    selectedModel,
     setSelectedModel,
     setSelectedProviderId,
     providers,
@@ -120,7 +119,11 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
     setAutonomousDialogOpen,
   } = props
   const promptInput = usePromptInputController()
-  const planFollowUpActive = hasPendingPlan && !/^\/goal(?:\s|$)/i.test(promptInput.textInput.value.trim())
+  // Shift/Ctrl/⌘-click in a new chat: one prompt to several models.
+  const compare = useComposerCompare(props)
+  const planFollowUpActive =
+    hasPendingPlan &&
+    !/^\/goal(?:\s|$)/i.test(promptInput.textInput.value.trim())
   const planFollowUpLabel =
     planFollowUpActive && promptInput.textInput.value.trim().length > 0
       ? "Refine"
@@ -210,7 +213,11 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
         <SimpleDropdown
           align="start"
           trigger={
-            <PromptInputButton tooltip="Add" aria-label="Add" className="relative">
+            <PromptInputButton
+              tooltip="Add"
+              aria-label="Add"
+              className="relative"
+            >
               <PlusIcon className="size-3.5" />
               {promptInput.attachments.files.length > 0 && (
                 <span className="absolute -top-1 -right-1 flex size-3.5 items-center justify-center rounded-full bg-primary text-[8px] font-semibold text-primary-foreground tabular-nums">
@@ -220,11 +227,11 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
             </PromptInputButton>
           }
         >
-          <SimpleDropdownSubItem onClick={() => promptInput.attachments.openFileDialog()}>
+          <SimpleDropdownSubItem
+            onClick={() => promptInput.attachments.openFileDialog()}
+          >
             <PaperclipIcon className="size-3.5" /> Files and folders
           </SimpleDropdownSubItem>
-          <SimpleDropdownSeparator />
-          <ComposerOrchestrationMenu {...props} />
         </SimpleDropdown>
 
         {/* Permissions moved out of this "More options" menu and into the
@@ -345,15 +352,15 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
             Without it, Shift+Tab would put the thread into a state with no
             sign it happened and no way back except the same hidden shortcut.
             Clicking returns to Agent. */}
+        <ComposerOrchestrationMenu {...props} />
+
         {/* Permissions sits beside Mode: the two are chosen together — which
             mode the agent runs in, and how far it may act without asking. */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <PromptInputButton
               tooltip="Permissions"
-              className={cn(
-                permissionLevel === "bypass" && "text-destructive"
-              )}
+              className={cn(permissionLevel === "bypass" && "text-destructive")}
             >
               <HugeiconsIcon
                 icon={ShieldKeyIcon}
@@ -436,14 +443,17 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
                 {favoriteEntries.map((fav) => {
                   const p = fav.provider
                   const m = fav.model
-                  const isSel =
-                    selectedProviderId === p.id && selectedModel === m.id
+                  const isSel = compare.isRowSelected(p.id, m.id)
                   return (
                     <DropdownMenuItem
                       key={fav.key}
-                      onClick={() => {
+                      onClick={(event) => {
+                        if (compare.handleModelClick(event, p, m.id)) return
                         selectProviderModel(p, m.id)
                       }}
+                      onKeyDown={(event) =>
+                        compare.handleModelKeyDown(event, p, m.id)
+                      }
                       className={cn("gap-2", isSel && "bg-accent")}
                     >
                       <ProviderIcon provider={p} />
@@ -530,9 +540,11 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
                       sortedModelsByProviderId.get(provider.id) ??
                       provider.models
                     ).map((model) => {
-                      const isSelected =
-                        selectedProviderId === provider.id &&
-                        selectedModel === model.id
+                      // While comparing, every chosen model is checked.
+                      const isSelected = compare.isRowSelected(
+                        provider.id,
+                        model.id
+                      )
                       // Context window is pinned to the model's maximum —
                       // no per-model 1M/200k submenu, the row selects directly.
                       const contextLabel = supportsModelContextWindow(
@@ -544,12 +556,29 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
                       return (
                         <DropdownMenuItem
                           key={model.id}
-                          onClick={() => {
+                          onClick={(event) => {
+                            if (
+                              compare.handleModelClick(
+                                event,
+                                provider,
+                                model.id
+                              )
+                            )
+                              return
                             selectProviderModel(provider, model.id)
                           }}
+                          onKeyDown={(event) =>
+                            compare.handleModelKeyDown(
+                              event,
+                              provider,
+                              model.id
+                            )
+                          }
                           className={cn("gap-2.5", isSelected && "bg-accent")}
                         >
-                          <ProviderIcon provider={provider} />
+                          <ProviderIcon
+                            provider={modelIconProvider(provider, model)}
+                          />
                           <div className="min-w-0 flex-1">
                             <span
                               className={cn(
@@ -589,6 +618,7 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
                 </DropdownMenuSub>
               )
             })}
+            <ComposerCompareHint compare={compare} />
           </DropdownMenuContent>
         </DropdownMenu>
       </PromptInputTools>
@@ -605,6 +635,7 @@ export function ComposerFullFooter(props: ComposerFooterProps) {
           <ComposerSubmit
             status={isStreaming ? "streaming" : undefined}
             onStop={handleStop}
+            provider={selectedProvider}
             size={planFollowUpActive && !isStreaming ? "sm" : "icon-sm"}
             className={cn(
               planFollowUpActive && !isStreaming && "rounded-full px-4"

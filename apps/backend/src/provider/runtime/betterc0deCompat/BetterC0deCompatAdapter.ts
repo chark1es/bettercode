@@ -61,12 +61,16 @@ import {
   retryCleanupQuarantines,
   type CleanupQuarantineState,
 } from "../CleanupQuarantine"
-import { buildWindowsCmdArgs } from "../../../security/windowsCommandLine"
+import {
+  buildWindowsCmdArgs,
+  resolveComSpec,
+} from "../../../security/windowsCommandLine"
 import { logger } from "../../../observability/logger"
 import {
   BETTERC0DE_COMPAT_PROFILE,
   type OpenCodeCompatProfile,
 } from "./OpenCodeCompatProfile"
+import { cliVersionAtLeast } from "../../../cli/versions"
 
 const DEFAULT_HOSTNAME = "127.0.0.1"
 const DEFAULT_SERVER_TIMEOUT_MS = 5_000
@@ -1420,7 +1424,9 @@ export class BetterC0deCompatAdapter implements ProviderAdapterShape {
       if (
         minimumVersion &&
         version &&
-        compareSemverVersions(version, minimumVersion) < 0
+        !cliVersionAtLeast(version, minimumVersion, {
+          prereleaseMeetsRelease: true,
+        })
       ) {
         return {
           configured: false,
@@ -4441,21 +4447,6 @@ function parseGenericCliVersion(output: string): string | null {
   return output.match(/\b(\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?)/i)?.[1] ?? null
 }
 
-function compareSemverVersions(a: string, b: string): number {
-  const left = parseVersion(a)
-  const right = parseVersion(b)
-  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    const diff = (left[index] ?? 0) - (right[index] ?? 0)
-    if (diff !== 0) return diff
-  }
-  return 0
-}
-
-function parseVersion(value: string): number[] {
-  const numeric = value.match(/\d+(?:\.\d+)*/)?.[0] ?? ""
-  return numeric.split(".").map((part) => Number.parseInt(part, 10) || 0)
-}
-
 function formatBetterC0deProbeError(input: {
   readonly cause: unknown
   readonly isExternalServer: boolean
@@ -4541,7 +4532,7 @@ export function spawnBetterC0deBinary(
   const directExe =
     isWindows && path.isAbsolute(binaryPath) && /\.exe$/i.test(binaryPath)
   const viaCmd = isWindows && !directExe
-  const command = viaCmd ? process.env.ComSpec?.trim() || "cmd.exe" : binaryPath
+  const command = viaCmd ? resolveComSpec() : binaryPath
   const spawnArgs = viaCmd ? buildWindowsCmdArgs(binaryPath, args) : [...args]
   return spawn(command, spawnArgs, {
     env: sanitizedChildEnvironment(options.env),

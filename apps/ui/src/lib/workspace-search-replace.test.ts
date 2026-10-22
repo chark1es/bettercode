@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { readFile, writeFile } from "@/services/backend"
+import { readFile, writeFile } from "@/services/backend/workspaceApi"
 import type { EditorTab } from "@/lib/editor-store"
 import { useEditorStore } from "@/lib/editor-store"
 import { replaceWorkspaceSearchResults } from "@/lib/workspace-search-replace"
@@ -8,14 +8,16 @@ const backendState = vi.hoisted(() => ({
   files: new Map<string, string>(),
 }))
 
-vi.mock("@/services/backend", () => ({
+vi.mock("@/services/backend/workspaceApi", () => ({
   readFile: vi.fn(async (filePath: string) => ({
     path: filePath,
     content: backendState.files.get(filePath) ?? "",
   })),
-  writeFile: vi.fn(async (cwd: string, relativePath: string, contents: string) => {
-    backendState.files.set(`${cwd}/${relativePath}`, contents)
-  }),
+  writeFile: vi.fn(
+    async (cwd: string, relativePath: string, contents: string) => {
+      backendState.files.set(`${cwd}/${relativePath}`, contents)
+    }
+  ),
 }))
 
 const readFileMock = vi.mocked(readFile)

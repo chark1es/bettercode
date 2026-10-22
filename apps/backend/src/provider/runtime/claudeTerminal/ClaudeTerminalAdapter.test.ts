@@ -4,6 +4,7 @@ import path from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   ClaudeTerminalAdapter,
+  claudeProjectDirectoryName,
   delayWithSignal,
 } from "./ClaudeTerminalAdapter"
 import type { ProviderRuntimeEvent, ThreadId } from "../contracts"
@@ -42,7 +43,9 @@ function makeFakeClaudeBinary(logPath: string): string {
       "const sessionId = readArg('--resume') || readArg('--session-id') || '00000000-0000-4000-8000-000000000000'",
       "const cwd = process.cwd()",
       "const home = process.env.HOME || process.env.USERPROFILE || process.cwd()",
-      "const projectDir = path.join(home, '.claude', 'projects', path.resolve(cwd).replace(/[/.]/g, '-'))",
+      // Claude Code's own project-directory naming: every non-alphanumeric
+      // character becomes "-".
+      "const projectDir = path.join(home, '.claude', 'projects', path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-'))",
       "fs.mkdirSync(projectDir, { recursive: true })",
       "const sessionPath = path.join(projectDir, `${sessionId}.jsonl`)",
       "const lines = [",
@@ -67,10 +70,16 @@ function writeClaudeSessionFile(input: {
     input.homePath,
     ".claude",
     "projects",
-    fs.realpathSync.native(path.resolve(input.cwd)).replace(/[/.]/g, "-")
+    fs.realpathSync
+      .native(path.resolve(input.cwd))
+      .replace(/[^a-zA-Z0-9]/g, "-")
   )
   fs.mkdirSync(projectDir, { recursive: true })
-  fs.writeFileSync(path.join(projectDir, `${input.sessionId}.jsonl`), "\n", "utf8")
+  fs.writeFileSync(
+    path.join(projectDir, `${input.sessionId}.jsonl`),
+    "\n",
+    "utf8"
+  )
 }
 
 afterEach(() => {
@@ -81,34 +90,50 @@ afterEach(() => {
 })
 
 describe("Claude terminal polling", () => {
-  it.each(["../outside", "C:\\private\\history", "/absolute", "not-a-uuid"])("discards unsafe persisted session identifiers: %s", async (sessionId) => {
-    for (const source of ["cursor", "stored"] as const) {
-      const adapter = new ClaudeTerminalAdapter({
-        getStoredProviderThreadId: () => source === "stored" ? sessionId : null,
-      })
-      const session = await adapter.startSession({
-        threadId: `thread-${source}` as ThreadId,
-        resumeCursor: source === "cursor" ? { sessionId } : null,
-      })
-      expect(session.providerThreadId).toBeNull()
-      expect(session.resumeCursor).toBeNull()
+  it.each(["../outside", "C:\\private\\history", "/absolute", "not-a-uuid"])(
+    "discards unsafe persisted session identifiers: %s",
+    async (sessionId) => {
+      for (const source of ["cursor", "stored"] as const) {
+        const adapter = new ClaudeTerminalAdapter({
+          getStoredProviderThreadId: () =>
+            source === "stored" ? sessionId : null,
+        })
+        const session = await adapter.startSession({
+          threadId: `thread-${source}` as ThreadId,
+          resumeCursor: source === "cursor" ? { sessionId } : null,
+        })
+        expect(session.providerThreadId).toBeNull()
+        expect(session.resumeCursor).toBeNull()
+      }
     }
-  })
+  )
 
   it("drains cancelled preparation without spawning after session stop", async () => {
     const adapter = new ClaudeTerminalAdapter()
     const threadId = "thread-preparing" as ThreadId
     await adapter.startSession({ threadId })
     let releasePreparation!: (cwd: string) => void
-    vi.spyOn(fs.promises, "realpath").mockImplementationOnce(() => new Promise<string>((resolve) => {
-      releasePreparation = resolve
-    }))
-    const spawn = vi.spyOn(nativePty, "spawnNativePtyAsync").mockRejectedValue(new Error("unexpected spawn"))
+    vi.spyOn(fs.promises, "realpath").mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          releasePreparation = resolve
+        })
+    )
+    const spawn = vi
+      .spyOn(nativePty, "spawnNativePtyAsync")
+      .mockRejectedValue(new Error("unexpected spawn"))
     const events: ProviderRuntimeEvent[] = []
     adapter.subscribe((event) => events.push(event))
-    const turn = adapter.sendTurn({ threadId, message: "hello", modelId: "claude-opus-4-7", history: [] })
+    const turn = adapter.sendTurn({
+      threadId,
+      message: "hello",
+      modelId: "claude-opus-4-7",
+      history: [],
+    })
     let stopped = false
-    const stop = adapter.stopSession(threadId).then(() => { stopped = true })
+    const stop = adapter.stopSession(threadId).then(() => {
+      stopped = true
+    })
     await Promise.resolve()
     await Promise.resolve()
     const stoppedBeforePreparation = stopped
@@ -125,23 +150,39 @@ describe("Claude terminal polling", () => {
     const threadId = "thread-spawning" as ThreadId
     const cwd = makeTempDir("betterc0de-terminal-spawning-")
     let releaseSpawn!: (child: NativePtyHandle) => void
-    const spawn = vi.spyOn(nativePty, "spawnNativePtyAsync").mockImplementation(() => new Promise((resolve) => {
-      releaseSpawn = resolve
-    }))
+    const spawn = vi.spyOn(nativePty, "spawnNativePtyAsync").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseSpawn = resolve
+        })
+    )
     let releaseExit!: () => void
     const exit = new Promise<{ exitCode: number; signal: null }>((resolve) => {
       releaseExit = () => resolve({ exitCode: 0, signal: null })
     })
     const child: NativePtyHandle = {
-      pid: 4567, write: vi.fn(), resize: vi.fn(),
-      kill: vi.fn(async () => { releaseExit() }), waitForExit: () => exit,
+      pid: 4567,
+      write: vi.fn(),
+      resize: vi.fn(),
+      kill: vi.fn(async () => {
+        releaseExit()
+      }),
+      waitForExit: () => exit,
     }
     const events: ProviderRuntimeEvent[] = []
     adapter.subscribe((event) => events.push(event))
-    const turn = adapter.sendTurn({ threadId, projectPath: cwd, message: "hello", modelId: "claude-opus-4-7", history: [] })
+    const turn = adapter.sendTurn({
+      threadId,
+      projectPath: cwd,
+      message: "hello",
+      modelId: "claude-opus-4-7",
+      history: [],
+    })
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce())
     let stopped = false
-    const stop = adapter.stopSession(threadId).then(() => { stopped = true })
+    const stop = adapter.stopSession(threadId).then(() => {
+      stopped = true
+    })
     await Promise.resolve()
     await Promise.resolve()
     const stoppedBeforeSpawn = stopped
@@ -162,11 +203,24 @@ describe("Claude terminal polling", () => {
     const cwd = makeTempDir("betterc0de-terminal-unconfirmed-")
     const failure = new Error("process-tree cleanup unconfirmed")
     const child: NativePtyHandle = {
-      pid: 4568, write: vi.fn(), resize: vi.fn(), kill: vi.fn(async () => {}),
-      waitForExit: vi.fn(async () => { throw failure }),
+      pid: 4568,
+      write: vi.fn(),
+      resize: vi.fn(),
+      kill: vi.fn(async () => {}),
+      waitForExit: vi.fn(async () => {
+        throw failure
+      }),
     }
-    const spawn = vi.spyOn(nativePty, "spawnNativePtyAsync").mockResolvedValue(child)
-    const input = { threadId, projectPath: cwd, message: "hello", modelId: "claude-opus-4-7", history: [] }
+    const spawn = vi
+      .spyOn(nativePty, "spawnNativePtyAsync")
+      .mockResolvedValue(child)
+    const input = {
+      threadId,
+      projectPath: cwd,
+      message: "hello",
+      modelId: "claude-opus-4-7",
+      history: [],
+    }
     await adapter.sendTurn(input)
     await expect(adapter.stopSession(threadId)).rejects.toBe(failure)
     expect(adapter.hasSession(threadId)).toBe(true)
@@ -179,14 +233,31 @@ describe("Claude terminal polling", () => {
     const threadId = "thread-stop-all-preparing" as ThreadId
     await adapter.startSession({ threadId })
     let releasePreparation!: (cwd: string) => void
-    vi.spyOn(fs.promises, "realpath").mockImplementationOnce(() => new Promise<string>((resolve) => {
-      releasePreparation = resolve
-    }))
-    const turn = adapter.sendTurn({ threadId, message: "hello", modelId: "claude-opus-4-7", history: [] })
+    vi.spyOn(fs.promises, "realpath").mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          releasePreparation = resolve
+        })
+    )
+    const turn = adapter.sendTurn({
+      threadId,
+      message: "hello",
+      modelId: "claude-opus-4-7",
+      history: [],
+    })
     const stop = adapter.stopAll()
     try {
-      await expect(adapter.startSession({ threadId: "new-thread" as ThreadId })).rejects.toThrow("stopping")
-      await expect(adapter.sendTurn({ threadId, message: "next", modelId: "claude-opus-4-7", history: [] })).rejects.toThrow("stopping")
+      await expect(
+        adapter.startSession({ threadId: "new-thread" as ThreadId })
+      ).rejects.toThrow("stopping")
+      await expect(
+        adapter.sendTurn({
+          threadId,
+          message: "next",
+          modelId: "claude-opus-4-7",
+          history: [],
+        })
+      ).rejects.toThrow("stopping")
     } finally {
       releasePreparation(process.cwd())
       await Promise.all([turn, stop])
@@ -196,12 +267,24 @@ describe("Claude terminal polling", () => {
 
   it("clears turn admission when persistence fails before spawning", async () => {
     const failure = new Error("persist failed")
-    const persist = vi.fn(() => { throw failure })
-    const adapter = new ClaudeTerminalAdapter({ persistProviderThreadId: persist })
+    const persist = vi.fn(() => {
+      throw failure
+    })
+    const adapter = new ClaudeTerminalAdapter({
+      persistProviderThreadId: persist,
+    })
     const threadId = "thread-persist-failure" as ThreadId
     const cwd = makeTempDir("betterc0de-terminal-persist-")
     const spawn = vi.spyOn(nativePty, "spawnNativePtyAsync")
-    await expect(adapter.sendTurn({ threadId, projectPath: cwd, message: "hello", modelId: "claude-opus-4-7", history: [] })).rejects.toBe(failure)
+    await expect(
+      adapter.sendTurn({
+        threadId,
+        projectPath: cwd,
+        message: "hello",
+        modelId: "claude-opus-4-7",
+        history: [],
+      })
+    ).rejects.toBe(failure)
     expect(await adapter.listSessions()).toEqual([
       expect.objectContaining({ status: "ready", activeTurnId: null }),
     ])
@@ -310,9 +393,11 @@ describe("Claude terminal polling", () => {
       finishKill = resolve
     })
     let finishExit!: () => void
-    const exitPending = new Promise<{ exitCode: number; signal: null }>((resolve) => {
-      finishExit = () => resolve({ exitCode: 0, signal: null })
-    })
+    const exitPending = new Promise<{ exitCode: number; signal: null }>(
+      (resolve) => {
+        finishExit = () => resolve({ exitCode: 0, signal: null })
+      }
+    )
     const child: NativePtyHandle = {
       pid: 4242,
       write: vi.fn(),
@@ -456,7 +541,10 @@ describe.skipIf(process.platform === "win32")("ClaudeTerminalAdapter", () => {
     const homePath = makeTempDir("betterc0de-claude-terminal-home-")
     fs.mkdirSync(path.join(homePath, ".claude"), { recursive: true })
     fs.writeFileSync(path.join(homePath, ".claude", "credentials.json"), "{}\n")
-    const logPath = path.join(makeTempDir("betterc0de-claude-terminal-log-"), "args.jsonl")
+    const logPath = path.join(
+      makeTempDir("betterc0de-claude-terminal-log-"),
+      "args.jsonl"
+    )
     const binaryPath = makeFakeClaudeBinary(logPath)
     const persisted: Array<{
       providerThreadId: string | null
@@ -502,7 +590,9 @@ describe.skipIf(process.platform === "win32")("ClaudeTerminalAdapter", () => {
     expect(firstSessionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
     )
-    const firstArgs = JSON.parse(fs.readFileSync(logPath, "utf8").trim()) as string[]
+    const firstArgs = JSON.parse(
+      fs.readFileSync(logPath, "utf8").trim()
+    ) as string[]
     expect(firstArgs).toContain("--session-id")
     expect(firstArgs).toContain("--dangerously-skip-permissions")
 
@@ -651,5 +741,72 @@ describe.skipIf(process.platform === "win32")("ClaudeTerminalAdapter", () => {
     expect(tools).not.toContain("Agent")
     expect(args).not.toContain("--dangerously-skip-permissions")
   })
-
 })
+
+describe("Claude Code project directory naming", () => {
+  it("replaces every non-alphanumeric character like the CLI does", () => {
+    expect(
+      claudeProjectDirectoryName("C:\\Users\\me\\.betterc0de-dev-userdata")
+    ).toBe("C--Users-me--betterc0de-dev-userdata")
+    expect(claudeProjectDirectoryName("/home/me/my_repo v2")).toBe(
+      "-home-me-my-repo-v2"
+    )
+  })
+
+  it("cuts long names and appends the CLI's base-36 string hash", () => {
+    const longPath = `/work/${"a".repeat(240)}`
+    const name = claudeProjectDirectoryName(longPath)
+    let hash = 0
+    for (let index = 0; index < longPath.length; index += 1) {
+      hash = ((hash << 5) - hash + longPath.charCodeAt(index)) | 0
+    }
+    expect(name).toBe(
+      `${longPath.replace(/[^a-zA-Z0-9]/g, "-").slice(0, 200)}-${Math.abs(
+        hash
+      ).toString(36)}`
+    )
+  })
+})
+
+describe.skipIf(process.platform === "win32")(
+  "ClaudeTerminalAdapter permission levels and prompt delivery",
+  () => {
+    it("treats full-access as allow-edits and never skips Claude's permission prompts", async () => {
+      const cwd = makeTempDir("betterc0de-claude-terminal-full-repo-")
+      const homePath = makeTempDir("betterc0de-claude-terminal-full-home-")
+      fs.mkdirSync(path.join(homePath, ".claude"), { recursive: true })
+      fs.writeFileSync(
+        path.join(homePath, ".claude", "credentials.json"),
+        "{}\n"
+      )
+      const logPath = path.join(
+        makeTempDir("betterc0de-claude-terminal-full-log-"),
+        "args.jsonl"
+      )
+      const adapter = new ClaudeTerminalAdapter({
+        binaryPath: makeFakeClaudeBinary(logPath),
+        homePath,
+      })
+
+      await adapter.sendTurn({
+        threadId: "thread-full-access",
+        message: "- edit the readme",
+        modelId: "claude-opus-4-7",
+        projectPath: cwd,
+        history: [],
+        permissionLevel: "full-access",
+      })
+
+      const args = JSON.parse(
+        fs.readFileSync(logPath, "utf8").trim()
+      ) as string[]
+      expect(args).not.toContain("--dangerously-skip-permissions")
+      const tools = (args[args.indexOf("--tools") + 1] ?? "").split(",")
+      expect(tools).toContain("Edit")
+      expect(tools).not.toContain("Bash")
+      // The prompt follows `--`, so a leading "-" is not read as an option.
+      expect(args.at(-2)).toBe("--")
+      expect(args.at(-1)).toBe("- edit the readme")
+    })
+  }
+)

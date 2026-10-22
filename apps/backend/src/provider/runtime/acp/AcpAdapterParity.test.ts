@@ -6,7 +6,6 @@ import type {
   ProviderRuntimeEvent,
   ThreadId,
 } from "../contracts"
-import { configureAgentPermissionRuntime } from "../../agent-permission-runtime"
 import type {
   AcpEvent,
   AcpExit,
@@ -161,31 +160,167 @@ async function runScenario(profile: (typeof PROFILES)[number]) {
 
 describe("ACP adapter parity (Cursor vs Grok)", () => {
   afterEach(() => {
-    configureAgentPermissionRuntime(null)
     vi.useRealTimers()
   })
 
-  it.each(PROFILES)("$name: applies a stricter per-turn approval policy to an existing full-access session", async (profile) => {
-    const runtime = new FakeAcpRuntime()
-    const adapter = profile.make(() => runtime)
-    const threadId = "change-permission-mode" as ThreadId
-    const events: ProviderRuntimeEvent[] = []
-    adapter.subscribe((event) => {
-      events.push(event)
-      if (event.type === "request.opened") {
-        void adapter.respondToRequest(threadId, event.requestId as ApprovalRequestId, { kind: "tool_approval", decision: "deny" })
+  it.each(PROFILES)(
+    "$name: applies a stricter per-turn approval policy to an existing full-access session",
+    async (profile) => {
+      const runtime = new FakeAcpRuntime()
+      const adapter = profile.make(() => runtime)
+      const threadId = "change-permission-mode" as ThreadId
+      const events: ProviderRuntimeEvent[] = []
+      adapter.subscribe((event) => {
+        events.push(event)
+        if (event.type === "request.opened") {
+          void adapter.respondToRequest(
+            threadId,
+            event.requestId as ApprovalRequestId,
+            { kind: "tool_approval", decision: "deny" }
+          )
+        }
+      })
+      await adapter.startSession({ threadId, runtimeMode: "full-access" })
+      try {
+        await adapter.sendTurn({
+          threadId,
+          message: "Inspect only",
+          modelId: "default",
+          history: [],
+          permissionLevel: "ask",
+        })
+        await expect(
+          runtime.triggerPermission({
+            kind: "edit",
+            raw: { options: PERMISSION_OPTIONS },
+          })
+        ).resolves.toMatchObject({ outcome: { optionId: "reject-once" } })
+        expect(
+          events.some(
+            (event) =>
+              event.type ===
+              (profile.name === "cursor" ? "request.opened" : "tool.denied")
+          )
+        ).toBe(true)
+        expect((await adapter.listSessions())[0]?.runtimeMode).toBe(
+          "approval-required"
+        )
+      } finally {
+        await adapter.stopAll()
       }
-    })
-    await adapter.startSession({ threadId, runtimeMode: "full-access" })
-    try {
-      await adapter.sendTurn({ threadId, message: "Inspect only", modelId: "default", history: [], permissionLevel: "ask" })
-      await expect(runtime.triggerPermission({ kind: "edit", raw: { options: PERMISSION_OPTIONS } })).resolves.toMatchObject({ outcome: { optionId: "reject-once" } })
-      expect(events.some((event) => event.type === (profile.name === "cursor" ? "request.opened" : "tool.denied"))).toBe(true)
-      expect((await adapter.listSessions())[0]?.runtimeMode).toBe("approval-required")
-    } finally {
-      await adapter.stopAll()
     }
-  })
+  )
+
+  it.each(PROFILES)(
+    "$name: sends images as ACP blocks when advertised and announces the rest",
+    async (profile) => {
+      const attachments = [
+        {
+          type: "file",
+          filename: "shot.png",
+          mediaType: "image/png",
+          url: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        {
+          type: "file",
+          filename: "spec.pdf",
+          mediaType: "application/pdf",
+          url: "data:application/pdf;base64,JVBERi0=",
+        },
+      ]
+      for (const acceptsImages of [true, false]) {
+        const runtime = new FakeAcpRuntime()
+        const start = runtime.start.bind(runtime)
+        vi.spyOn(runtime, "start").mockImplementation(async () => ({
+          ...(await start()),
+          initializeResult: Object.assign(
+            { protocolVersion: 1 },
+            {
+              agentCapabilities: {
+                promptCapabilities: { image: acceptsImages },
+              },
+            }
+          ),
+        }))
+        const adapter = profile.make(() => runtime)
+        const events: ProviderRuntimeEvent[] = []
+        adapter.subscribe((event) => events.push(event))
+        const threadId = `attachments-${acceptsImages}` as ThreadId
+        await adapter.startSession({ threadId })
+        try {
+          await adapter.sendTurn({
+            threadId,
+            message: "Look",
+            modelId: "default",
+            history: [],
+            attachments,
+          })
+          const [prompt] = runtime.prompts
+          const text = String(prompt?.prompt[0]?.text)
+          expect(text).toContain("spec.pdf")
+          if (acceptsImages) {
+            expect(prompt?.prompt.slice(1)).toEqual([
+              { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+            ])
+            expect(text).not.toContain("shot.png")
+          } else {
+            expect(prompt?.prompt).toHaveLength(1)
+            expect(text).toContain("shot.png")
+          }
+          // Nothing disappears silently: the user is told what was not sent.
+          expect(events.some((event) => event.type === "runtime.warning")).toBe(
+            true
+          )
+        } finally {
+          await adapter.stopAll()
+        }
+      }
+    }
+  )
+
+  it.each(PROFILES)(
+    '$name: never inherits full access for a turn without a level, nor grants it for "full-access"',
+    async (profile) => {
+      const runtime = new FakeAcpRuntime()
+      const adapter = profile.make(() => runtime)
+      const threadId = "no-inherited-bypass" as ThreadId
+      const events: ProviderRuntimeEvent[] = []
+      adapter.subscribe((event) => {
+        events.push(event)
+        if (event.type === "request.opened") {
+          void adapter.respondToRequest(
+            threadId,
+            event.requestId as ApprovalRequestId,
+            { kind: "tool_approval", decision: "deny" }
+          )
+        }
+      })
+      await adapter.startSession({ threadId, runtimeMode: "full-access" })
+      try {
+        for (const permissionLevel of [undefined, "full-access"]) {
+          await adapter.sendTurn({
+            threadId,
+            message: "Edit it",
+            modelId: "default",
+            history: [],
+            ...(permissionLevel ? { permissionLevel } : {}),
+          })
+          // Not auto-approved: the request reaches the user, who denies it.
+          await expect(
+            runtime.triggerPermission({
+              kind: "edit",
+              raw: { options: PERMISSION_OPTIONS },
+            })
+          ).resolves.toMatchObject({ outcome: { optionId: "reject-once" } })
+        }
+        expect(
+          events.filter((event) => event.type === "request.opened")
+        ).toHaveLength(2)
+      } finally {
+        await adapter.stopAll()
+      }
+    }
+  )
 
   it("applies the Grok read-only ceiling for a direct first turn and later mode changes", async () => {
     const runtime = new FakeAcpRuntime()
@@ -195,66 +330,114 @@ describe("ACP adapter parity (Cursor vs Grok)", () => {
     adapter.subscribe((event) => {
       events.push(event)
       if (event.type === "request.opened") {
-        void adapter.respondToRequest(threadId, event.requestId as ApprovalRequestId, { kind: "tool_approval", decision: "approve" })
+        void adapter.respondToRequest(
+          threadId,
+          event.requestId as ApprovalRequestId,
+          { kind: "tool_approval", decision: "approve" }
+        )
       }
     })
     try {
       for (const permissionLevel of ["bypass", "full"] as const) {
-        await adapter.sendTurn({ threadId, message: "Inspect only", modelId: "default", history: [], permissionLevel, chatMode: "ask" })
-        await expect(runtime.triggerPermission({ kind: "edit", raw: { options: PERMISSION_OPTIONS } })).resolves.toMatchObject({ outcome: { optionId: "reject-once" } })
+        await adapter.sendTurn({
+          threadId,
+          message: "Inspect only",
+          modelId: "default",
+          history: [],
+          permissionLevel,
+          chatMode: "ask",
+        })
+        await expect(
+          runtime.triggerPermission({
+            kind: "edit",
+            raw: { options: PERMISSION_OPTIONS },
+          })
+        ).resolves.toMatchObject({ outcome: { optionId: "reject-once" } })
       }
-      expect(events.filter((event) => event.type === "tool.denied")).toHaveLength(2)
-      expect(events.some((event) => event.type === "request.opened")).toBe(false)
+      expect(
+        events.filter((event) => event.type === "tool.denied")
+      ).toHaveLength(2)
+      expect(events.some((event) => event.type === "request.opened")).toBe(
+        false
+      )
     } finally {
       await adapter.stopAll()
     }
   })
 
-  it.each(PROFILES)("$name: accepts an approval reply synchronously triggered by the opened event", async (profile) => {
-    const runtime = new FakeAcpRuntime()
-    const adapter = profile.make(() => runtime)
-    const threadId = "immediate-approval" as ThreadId
-    let response: Promise<void> | undefined
-    adapter.subscribe((event) => {
-      if (event.type !== "request.opened") return
-      response = adapter.respondToRequest(threadId, event.requestId as ApprovalRequestId, { kind: "tool_approval", decision: "approve" })
-      void response.catch(() => {})
-    })
-    await adapter.startSession({ threadId })
-    try {
-      const permission = runtime.triggerPermission({ kind: "edit", raw: { options: PERMISSION_OPTIONS } })
-      await expect(response).resolves.toBeUndefined()
-      await expect(permission).resolves.toMatchObject({ outcome: { outcome: "selected", optionId: "allow-once" } })
-    } finally {
-      await adapter.stopAll()
+  it.each(PROFILES)(
+    "$name: accepts an approval reply synchronously triggered by the opened event",
+    async (profile) => {
+      const runtime = new FakeAcpRuntime()
+      const adapter = profile.make(() => runtime)
+      const threadId = "immediate-approval" as ThreadId
+      let response: Promise<void> | undefined
+      adapter.subscribe((event) => {
+        if (event.type !== "request.opened") return
+        response = adapter.respondToRequest(
+          threadId,
+          event.requestId as ApprovalRequestId,
+          { kind: "tool_approval", decision: "approve" }
+        )
+        void response.catch(() => {})
+      })
+      await adapter.startSession({ threadId })
+      try {
+        const permission = runtime.triggerPermission({
+          kind: "edit",
+          raw: { options: PERMISSION_OPTIONS },
+        })
+        await expect(response).resolves.toBeUndefined()
+        await expect(permission).resolves.toMatchObject({
+          outcome: { outcome: "selected", optionId: "allow-once" },
+        })
+      } finally {
+        await adapter.stopAll()
+      }
     }
-  })
+  )
 
-  it.each(PROFILES)("$name: stopping from the opened event settles the request without a late resolution event", async (profile) => {
-    vi.useFakeTimers()
-    const runtime = new FakeAcpRuntime()
-    const adapter = profile.make(() => runtime)
-    const threadId = "stop-on-approval" as ThreadId
-    const events: ProviderRuntimeEvent[] = []
-    let stop: Promise<void> | undefined
-    let settled = false
-    adapter.subscribe((event) => {
-      events.push(event)
-      if (event.type === "request.opened") stop = adapter.stopSession(threadId)
-    })
-    await adapter.startSession({ threadId })
-    try {
-      const permission = runtime.triggerPermission({ kind: "edit", raw: { options: PERMISSION_OPTIONS } }).then((outcome) => { settled = true; return outcome })
-      await stop
-      await Promise.resolve()
-      expect(settled).toBe(true)
-      await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } })
-      expect(events.some((event) => event.type === "request.resolved")).toBe(false)
-    } finally {
-      await adapter.stopAll()
-      await vi.runOnlyPendingTimersAsync()
+  it.each(PROFILES)(
+    "$name: stopping from the opened event settles the request without a late resolution event",
+    async (profile) => {
+      vi.useFakeTimers()
+      const runtime = new FakeAcpRuntime()
+      const adapter = profile.make(() => runtime)
+      const threadId = "stop-on-approval" as ThreadId
+      const events: ProviderRuntimeEvent[] = []
+      let stop: Promise<void> | undefined
+      let settled = false
+      adapter.subscribe((event) => {
+        events.push(event)
+        if (event.type === "request.opened")
+          stop = adapter.stopSession(threadId)
+      })
+      await adapter.startSession({ threadId })
+      try {
+        const permission = runtime
+          .triggerPermission({
+            kind: "edit",
+            raw: { options: PERMISSION_OPTIONS },
+          })
+          .then((outcome) => {
+            settled = true
+            return outcome
+          })
+        await stop
+        await Promise.resolve()
+        expect(settled).toBe(true)
+        await expect(permission).resolves.toEqual({
+          outcome: { outcome: "cancelled" },
+        })
+        expect(events.some((event) => event.type === "request.resolved")).toBe(
+          false
+        )
+      } finally {
+        await adapter.stopAll()
+        await vi.runOnlyPendingTimersAsync()
+      }
     }
-  })
+  )
 
   it("projects the same canonical stream from the same runtime script, modulo identity", async () => {
     const cursor = await runScenario(PROFILES[0])

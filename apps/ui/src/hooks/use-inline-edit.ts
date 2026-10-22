@@ -1,6 +1,6 @@
 import { useCallback } from "react"
 import { useChatStore } from "@/lib/chat-store"
-import { sendChatMessage } from "@/services/backend"
+import { sendChatMessage } from "@/lib/chat/send-message"
 import { resolveProviderTarget } from "@/lib/resolve-provider-target"
 import { resolveDispatchModelId } from "@/lib/provider-model-selection"
 import { coerceThinkingModeForModel } from "@/lib/model-capabilities"

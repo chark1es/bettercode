@@ -1,5 +1,12 @@
 import { copyText } from "@/lib/clipboard"
-import { lazy, Suspense, useState, useEffect, useCallback, useMemo } from "react"
+import {
+  lazy,
+  Suspense,
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+} from "react"
 import { cn } from "@/lib/utils"
 import { useAppearanceStore } from "@/lib/appearance-store"
 import { Button } from "@/components/ui/button"
@@ -9,14 +16,14 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { readFile } from "@/services/backend"
+import { readFile } from "@/services/backend/workspaceApi"
 
 // [PERF] Monaco is ~4 MB of JS + web workers. Defer it until the file-editor
 // modal actually opens instead of paying the parse cost at startup.
 const MonacoEditorWrapper = lazy(() =>
   import("@/components/monaco-editor-wrapper").then((m) => ({
     default: m.MonacoEditorWrapper,
-  })),
+  }))
 )
 import {
   XIcon,
@@ -129,7 +136,7 @@ export function FileEditorModal({
     if (!filePath || !isDirty) return
     setSaving(true)
     try {
-      const { writeFile } = await import("@/services/backend")
+      const { writeFile } = await import("@/services/backend/workspaceApi")
       const dir = filePath.substring(
         0,
         Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\")) + 1
@@ -144,7 +151,7 @@ export function FileEditorModal({
   }, [filePath, content, isDirty, fileName])
 
   const handleCopy = useCallback(async () => {
-    if (!await copyText(content)) return
+    if (!(await copyText(content))) return
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }, [content])
@@ -162,7 +169,7 @@ export function FileEditorModal({
         showCloseButton={false}
         className={cn(
           isSimple
-            ? "sm:max-w-5xl h-[75vh] flex flex-col gap-0 overflow-hidden p-0"
+            ? "flex h-[75vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl"
             : "flex h-[94vh] !w-[99vw] !max-w-[99vw] flex-col gap-0 overflow-hidden p-0 sm:!w-[99vw] sm:!max-w-[99vw]"
         )}
       >
@@ -258,7 +265,11 @@ export function FileEditorModal({
               srcDoc={previewDocument}
             />
           ) : (
-            <Suspense fallback={<div className="h-full w-full animate-pulse bg-muted/30" />}>
+            <Suspense
+              fallback={
+                <div className="h-full w-full animate-pulse bg-muted/30" />
+              }
+            >
               <MonacoEditorWrapper
                 filePath={filePath || "untitled"}
                 language={lang}

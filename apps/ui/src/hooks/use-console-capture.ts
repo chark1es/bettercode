@@ -1,12 +1,9 @@
 import { useEffect } from "react"
+import type { ConsoleLog } from "@/lib/console-log-store"
+import { useSettingsStore } from "@/lib/settings-store"
 import { ipcApi } from "@/services/ipc-facade"
 
-export type ConsoleLog = {
-  type: "log" | "warn" | "error" | "info" | "debug"
-  message: string
-  stack?: string
-  timestamp: Date
-}
+export type { ConsoleLog }
 
 const MAX_LOGS = 200
 const FLUSH_INTERVAL_MS = 150
@@ -75,12 +72,21 @@ export function useConsoleCapture(
       let message = args.map(formatArg).join(" ")
       if (message.length > MAX_MESSAGE_CHARS)
         message = message.slice(0, MAX_MESSAGE_CHARS) + "…"
-      const stack = args.filter((arg): arg is Error => arg instanceof Error)
-        .map((error) => error.stack || `${error.name}: ${error.message}`).join("\n\n").slice(0, 16_000)
-      const entry = { type, message, ...(stack ? { stack } : {}), timestamp: new Date() }
+      const stack = args
+        .filter((arg): arg is Error => arg instanceof Error)
+        .map((error) => error.stack || `${error.name}: ${error.message}`)
+        .join("\n\n")
+        .slice(0, 16_000)
+      const entry = {
+        type,
+        message,
+        ...(stack ? { stack } : {}),
+        timestamp: new Date(),
+      }
       buffer.push(entry)
       recentLogs.push(entry)
-      if (recentLogs.length > MAX_LOGS) recentLogs.splice(0, recentLogs.length - MAX_LOGS)
+      if (recentLogs.length > MAX_LOGS)
+        recentLogs.splice(0, recentLogs.length - MAX_LOGS)
       scheduleFlush()
     }
 
@@ -105,19 +111,38 @@ export function useConsoleCapture(
       addLog("debug", args)
     }
 
-    const reportError = (reason: unknown, fallback = "Unhandled renderer error") => {
-      const error = reason instanceof Error ? reason : new Error(typeof reason === "string" ? reason : fallback)
-      void ipcApi.bugReport.send({
-        automatic: true,
-        message: (error.message || fallback).slice(0, 128_000),
-        stack: (error.stack || "").slice(0, 32_000),
-        logs: recentLogs.map((log) => `[${log.timestamp.toISOString()}] [${log.type}] ${log.message}`).join("\n").slice(-64_000),
-      }).catch(() => {})
+    const reportError = (
+      reason: unknown,
+      fallback = "Unhandled renderer error"
+    ) => {
+      // Automatic reports are opt-in (Settings → Privacy & Diagnostics). The shell
+      // enforces the same choice; checking here keeps the log buffer from
+      // crossing IPC at all without consent.
+      if (useSettingsStore.getState().crashReportsEnabled !== true) return
+      const error =
+        reason instanceof Error
+          ? reason
+          : new Error(typeof reason === "string" ? reason : fallback)
+      void ipcApi.bugReport
+        .send({
+          automatic: true,
+          message: (error.message || fallback).slice(0, 128_000),
+          stack: (error.stack || "").slice(0, 32_000),
+          logs: recentLogs
+            .map(
+              (log) =>
+                `[${log.timestamp.toISOString()}] [${log.type}] ${log.message}`
+            )
+            .join("\n")
+            .slice(-64_000),
+        })
+        .catch(() => {})
     }
     const onError = (event: ErrorEvent) => {
       if (event.message) reportError(event.error, event.message)
     }
-    const onRejection = (event: PromiseRejectionEvent) => reportError(event.reason, "Unhandled renderer promise rejection")
+    const onRejection = (event: PromiseRejectionEvent) =>
+      reportError(event.reason, "Unhandled renderer promise rejection")
     if (typeof window !== "undefined") {
       window.addEventListener("error", onError)
       window.addEventListener("unhandledrejection", onRejection)

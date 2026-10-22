@@ -10,29 +10,6 @@ import {
   runWithShutdownDeadline,
   type ShutdownStep,
 } from "../shutdown"
-import {
-  activeShellSessionCount,
-  beginShellShutdown,
-  closeAllShellSessions,
-} from "../services/shell"
-import {
-  activeTerminalPtySessionCount,
-  beginTerminalPtyShutdown,
-  shutdownAllTerminalPtySessions,
-} from "../services/terminalPty"
-import { activeGitProcessCount } from "../services/git"
-import {
-  activeImageGenerationCount,
-  beginImageGenerationShutdown,
-} from "../services/image-generation"
-import {
-  activeNativeTextGenerationResourceCount,
-  beginNativeTextGenerationShutdown,
-} from "../services/native-text-generation"
-import {
-  activeWorkspaceProcessCount,
-  beginWorkspaceProcessShutdown,
-} from "../services/workspace"
 import { stopAllToolOutputArchiveStores } from "../services/tool-output-archive-store"
 import type { WsHub } from "../ws/server"
 import type {
@@ -46,7 +23,10 @@ import type {
 } from "./context"
 import { beginResourceManagerShutdowns } from "./lifecycle"
 import { threadGoals } from "../services/chat/goal-registry"
-import { configureAgentPermissionRuntime } from "../provider/agent-permission-runtime"
+import { threadAutonomyRuns } from "../services/chat/autonomy-registry"
+import { chatResumes } from "../services/chat/resume-registry"
+import { automationServices } from "../services/automations/registry"
+import { releaseAgentPermissionRuntime } from "../provider/agent-permission-runtime"
 
 /**
  * Everything the graceful shutdown closes over: the phase contexts built by
@@ -117,7 +97,17 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
     httpServer: server,
     httpRuntimeErrorListener: candidateRuntimeErrorListener,
   } = deps
-  const { options, requestAdmission, onStartupAbort } = root
+  const {
+    options,
+    requestAdmission,
+    onStartupAbort,
+    terminalPtys,
+    shellSessions,
+    gitProcesses,
+    imageGenerations,
+    nativeTextGenerations,
+    workspaceProcesses,
+  } = root
   const {
     git: requestGitProcessShutdown,
     imageGeneration: requestImageGenerationShutdown,
@@ -128,6 +118,7 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
   const {
     settings,
     remoteAccess,
+    tailscale,
     remoteProviderTurns,
     unsubscribeRemoteOwnerCleanup,
     transcriptRecoveryStore,
@@ -144,46 +135,61 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
   } = providersCtx
   const { providerRuntimeIngestion } = recovery
   const { threadRetention } = retention
-  const { transcriptRecoveryTimer, providerSessionReaper, vacuumTimer } = timers
+  const {
+    transcriptRecoveryTimer,
+    providerSessionReaper,
+    vacuumTimer,
+    pullRequestWatcher,
+  } = timers
   logger.info("Graceful shutdown initiated")
   requestAdmission.beginDrain()
   let orchestratorShutdownFailure: unknown = null
   const orchestratorShutdown = Promise.allSettled([
-    providersCtx.state.orchestrator?.close(), providersCtx.orchestratorHarness.close(),
-  ]).then(results => {
-    const failures = results.filter(result => result.status === "rejected")
-    if (failures.length) orchestratorShutdownFailure = new AggregateError(failures.map(result => result.reason), "Orchestrator shutdown failed")
+    providersCtx.state.orchestrator.close(),
+    providersCtx.orchestratorHarness.close(),
+  ]).then((results) => {
+    const failures = results.filter((result) => result.status === "rejected")
+    if (failures.length)
+      orchestratorShutdownFailure = new AggregateError(
+        failures.map((result) => result.reason),
+        "Orchestrator shutdown failed"
+      )
   })
   let codeSearchShutdownFailure: unknown = null
   const codeSearchShutdown = providersCtx.codeSearch.close().catch((error) => {
     codeSearchShutdownFailure = error
   })
   threadGoals.get(providersCtx.state)?.dispose()
+  threadAutonomyRuns.get(providersCtx.state)?.dispose()
+  // Before any turn is interrupted: the turns this shutdown cuts off keep
+  // their markers, so the next start can continue them.
+  chatResumes.get(providersCtx.state)?.beginShutdown()
+  // No scheduled run may start once the drain began; pending history is written.
+  automationServices.get(providersCtx.state)?.dispose()
+  // Its timer would otherwise outlive the backend and poll a closed database.
+  pullRequestWatcher.stop()
   providers.beginShutdown()
   providerHub.beginShutdown()
-  beginShellShutdown()
-  beginTerminalPtyShutdown()
-  beginImageGenerationShutdown()
-  beginNativeTextGenerationShutdown()
-  beginWorkspaceProcessShutdown()
+  shellSessions.beginShutdown()
+  terminalPtys.beginShutdown()
+  imageGenerations.beginShutdown()
+  nativeTextGenerations.beginShutdown()
+  workspaceProcesses.beginShutdown()
   hub.beginShutdown()
 
   // (a) Stop accepting new HTTP requests immediately, but retain a
   // promise for the bounded drain while cancellation below releases
   // long-running provider/shell requests.
   let httpDrainFailure: unknown = null
-  const httpDrain = closeHttpServer(
-    server,
-    SHUTDOWN_INFLIGHT_DRAIN_MS
-  ).catch((error) => {
-    httpDrainFailure = error
-  })
+  const httpDrain = closeHttpServer(server, SHUTDOWN_INFLIGHT_DRAIN_MS).catch(
+    (error) => {
+      httpDrainFailure = error
+    }
+  )
   let wsDrainFailure: unknown = null
-  const wsDrain = hub
-    .close(SHUTDOWN_INFLIGHT_DRAIN_MS)
-    .catch((error) => {
-      wsDrainFailure = error
-    })
+  const wsDrain = hub.close(SHUTDOWN_INFLIGHT_DRAIN_MS).catch((error) => {
+    wsDrainFailure = error
+  })
   let applicationDrainFailure: unknown = null
   const applicationDrain = requestAdmission
     .waitForIdle(SHUTDOWN_INFLIGHT_DRAIN_MS)
@@ -191,13 +197,15 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
       applicationDrainFailure = error
     })
   logger.info("HTTP listener closing — no new requests accepted")
+  // The tailnet name stops pointing at this backend once it is gone: a paired
+  // device then sees the desktop offline instead of a proxy error. Best
+  // effort and bounded; the next start re-applies the mapping.
+  const tailscaleRelease = tailscale.releaseServe()
 
   let retentionFailure: unknown = null
-  const retentionShutdown = threadRetention
-    .stop()
-    .catch((error) => {
-      retentionFailure = error
-    })
+  const retentionShutdown = threadRetention.stop().catch((error) => {
+    retentionFailure = error
+  })
   let providerReaperFailure: unknown = null
   const providerReaperShutdown = (
     providerSessionReaper?.stop() ?? Promise.resolve()
@@ -205,27 +213,20 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
     providerReaperFailure = error
   })
   let legacyInterruptFailure: unknown = null
-  const legacyInterrupt = providers
-    .interruptAll()
-    .catch((error) => {
-      legacyInterruptFailure = error
-      logger.error(
-        { err: error },
-        "interruptAll failed during shutdown"
-      )
-      return 0
-    })
+  const legacyInterrupt = providers.interruptAll().catch((error) => {
+    legacyInterruptFailure = error
+    logger.error({ err: error }, "interruptAll failed during shutdown")
+    return 0
+  })
   let nativeInterruptFailure: unknown = null
-  const nativeInterrupt = providerHub
-    .interruptAllTurns()
-    .catch((error) => {
-      nativeInterruptFailure = error
-      logger.error(
-        { err: error },
-        "providerHub interruptAllTurns failed during shutdown"
-      )
-      return 0
-    })
+  const nativeInterrupt = providerHub.interruptAllTurns().catch((error) => {
+    nativeInterruptFailure = error
+    logger.error(
+      { err: error },
+      "providerHub interruptAllTurns failed during shutdown"
+    )
+    return 0
+  })
   let remoteProviderTurnShutdownFailure: unknown = null
   const remoteProviderTurnShutdown = remoteProviderTurns
     .shutdown()
@@ -243,31 +244,31 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
   let imageGenerationShutdownFailure: unknown = null
   let nativeTextGenerationShutdownFailure: unknown = null
   let workspaceProcessShutdownFailure: unknown = null
-  const shellShutdown = closeAllShellSessions().catch((error) => {
+  const shellShutdown = shellSessions.closeAllSessions().catch((error) => {
     shellShutdownFailure = error
     return 0
   })
-  const terminalShutdown = shutdownAllTerminalPtySessions().catch(
+  const terminalShutdown = terminalPtys.shutdownAll().catch((error) => {
+    terminalShutdownFailure = error
+    return 0
+  })
+  const imageGenerationShutdown = requestImageGenerationShutdown().catch(
     (error) => {
-      terminalShutdownFailure = error
+      imageGenerationShutdownFailure = error
       return 0
     }
   )
-  const imageGenerationShutdown =
-    requestImageGenerationShutdown().catch((error) => {
-      imageGenerationShutdownFailure = error
-      return 0
-    })
   const nativeTextGenerationShutdown =
     requestNativeTextGenerationShutdown().catch((error) => {
       nativeTextGenerationShutdownFailure = error
       return 0
     })
-  const workspaceProcessShutdown =
-    requestWorkspaceProcessShutdown().catch((error) => {
+  const workspaceProcessShutdown = requestWorkspaceProcessShutdown().catch(
+    (error) => {
       workspaceProcessShutdownFailure = error
       return 0
-    })
+    }
+  )
   const [
     interruptedLegacyTurns,
     interruptedNativeTurns,
@@ -289,19 +290,17 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
     codeSearchShutdown,
     orchestratorShutdown,
   ])
-  const [lateShellSessions, lateTerminalSessions] =
-    await Promise.all([
-      closeAllShellSessions().catch((error) => {
-        shellShutdownFailure ??= error
-        return 0
-      }),
-      shutdownAllTerminalPtySessions().catch((error) => {
-        terminalShutdownFailure ??= error
-        return 0
-      }),
-    ])
-  const abortedShellSessions =
-    initiallyClosedShellSessions + lateShellSessions
+  const [lateShellSessions, lateTerminalSessions] = await Promise.all([
+    shellSessions.closeAllSessions().catch((error) => {
+      shellShutdownFailure ??= error
+      return 0
+    }),
+    terminalPtys.shutdownAll().catch((error) => {
+      terminalShutdownFailure ??= error
+      return 0
+    }),
+  ])
+  const abortedShellSessions = initiallyClosedShellSessions + lateShellSessions
   const closedTerminalSessions =
     initiallyClosedTerminalSessions + lateTerminalSessions
   if (
@@ -314,13 +313,11 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
   ) {
     logger.info(
       {
-        providerTurns:
-          interruptedLegacyTurns + interruptedNativeTurns,
+        providerTurns: interruptedLegacyTurns + interruptedNativeTurns,
         shellSessions: abortedShellSessions,
         terminalSessions: closedTerminalSessions,
         imageGenerations: stoppedImageGenerations,
-        nativeTextGenerationResources:
-          stoppedNativeTextGenerationResources,
+        nativeTextGenerationResources: stoppedNativeTextGenerationResources,
         workspaceProcesses: stoppedWorkspaceProcesses,
       },
       "Stopped active providers and local backend resources"
@@ -331,7 +328,7 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
   //     to settle (abort controllers fire → finally blocks run).
   // M6: log instead of silently mapping every error to 0 — diagnostic
   // info about a stuck interrupt mattered exactly once and we lost it.
-  await Promise.all([httpDrain, wsDrain, applicationDrain])
+  await Promise.all([httpDrain, wsDrain, applicationDrain, tailscaleRelease])
   await Promise.all([retentionShutdown, providerReaperShutdown])
   // The hub stops before the reactor and before ingestion, in that order.
   // `stopAll` emits the hub's own terminals for anything still open — a
@@ -341,15 +338,10 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
   // The startup unwind (`startupCleanup` reversed) does not honour this; it
   // runs only for a boot that failed before this handle existed, where no
   // turn should be open.
-  await providerHub
-    .stopAll(providerSessionBindings)
-    .catch((error) => {
-      providerHubStopFailure = error
-      logger.error(
-        { err: error },
-        "providerHub.stopAll failed during shutdown"
-      )
-    })
+  await providerHub.stopAll(providerSessionBindings).catch((error) => {
+    providerHubStopFailure = error
+    logger.error({ err: error }, "providerHub.stopAll failed during shutdown")
+  })
   let checkpointReactorFailure: unknown = null
   await checkpointReactor.stop().catch((error) => {
     checkpointReactorFailure = error
@@ -389,52 +381,49 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
     )
   })
 
-  if (
-    activeShellSessionCount() > 0 &&
-    shellShutdownFailure === null
-  ) {
+  if (shellSessions.activeSessionCount() > 0 && shellShutdownFailure === null) {
     shellShutdownFailure = new Error(
-      `${activeShellSessionCount()} shell session(s) remain active`
+      `${shellSessions.activeSessionCount()} shell session(s) remain active`
     )
   }
   if (
-    activeTerminalPtySessionCount() > 0 &&
+    terminalPtys.activeSessionCount() > 0 &&
     terminalShutdownFailure === null
   ) {
     terminalShutdownFailure = new Error(
-      `${activeTerminalPtySessionCount()} terminal session(s) remain active`
+      `${terminalPtys.activeSessionCount()} terminal session(s) remain active`
     )
   }
   if (
-    activeGitProcessCount() > 0 &&
+    gitProcesses.activeProcessCount() > 0 &&
     gitProcessShutdownFailure === null
   ) {
     gitProcessShutdownFailure = new Error(
-      `${activeGitProcessCount()} Git process(es) remain active`
+      `${gitProcesses.activeProcessCount()} Git process(es) remain active`
     )
   }
   if (
-    activeImageGenerationCount() > 0 &&
+    imageGenerations.activeGenerationCount() > 0 &&
     imageGenerationShutdownFailure === null
   ) {
     imageGenerationShutdownFailure = new Error(
-      `${activeImageGenerationCount()} image generation process tree(s) remain active`
+      `${imageGenerations.activeGenerationCount()} image generation process tree(s) remain active`
     )
   }
   if (
-    activeNativeTextGenerationResourceCount() > 0 &&
+    nativeTextGenerations.activeResourceCount() > 0 &&
     nativeTextGenerationShutdownFailure === null
   ) {
     nativeTextGenerationShutdownFailure = new Error(
-      `${activeNativeTextGenerationResourceCount()} native text-generation resource(s) remain active`
+      `${nativeTextGenerations.activeResourceCount()} native text-generation resource(s) remain active`
     )
   }
   if (
-    activeWorkspaceProcessCount() > 0 &&
+    workspaceProcesses.activeProcessCount() > 0 &&
     workspaceProcessShutdownFailure === null
   ) {
     workspaceProcessShutdownFailure = new Error(
-      `${activeWorkspaceProcessCount()} workspace formatter/config process(es) remain active`
+      `${workspaceProcesses.activeProcessCount()} workspace formatter/config process(es) remain active`
     )
   }
   if (
@@ -486,10 +475,7 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
         {
           name: "fail-closed startup abort listener",
           run: () =>
-            options.signal?.removeEventListener(
-              "abort",
-              onStartupAbort
-            ),
+            options.signal?.removeEventListener("abort", onStartupAbort),
         },
         {
           name: "fail-closed vacuum timer",
@@ -529,20 +515,15 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
     },
     {
       name: "image generation processes",
-      run: () =>
-        requestImageGenerationShutdown().then(() => undefined),
+      run: () => requestImageGenerationShutdown().then(() => undefined),
     },
     {
       name: "native text-generation resources",
-      run: () =>
-        requestNativeTextGenerationShutdown().then(
-          () => undefined
-        ),
+      run: () => requestNativeTextGenerationShutdown().then(() => undefined),
     },
     {
       name: "workspace formatter/config processes",
-      run: () =>
-        requestWorkspaceProcessShutdown().then(() => undefined),
+      run: () => requestWorkspaceProcessShutdown().then(() => undefined),
     },
     {
       name: "thread retention scheduler",
@@ -584,9 +565,7 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
       name: "provider event log flush",
       run: async () => {
         const results = await Promise.allSettled(
-          providerEventLoggers.map((eventLogger) =>
-            eventLogger.flush()
-          )
+          providerEventLoggers.map((eventLogger) => eventLogger.flush())
         )
         const failures = results.flatMap((result) =>
           result.status === "rejected" ? [result.reason] : []
@@ -638,10 +617,7 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
     {
       name: "startup abort listener",
       run: () => {
-        options.signal?.removeEventListener(
-          "abort",
-          onStartupAbort
-        )
+        options.signal?.removeEventListener("abort", onStartupAbort)
       },
     },
     {
@@ -671,7 +647,7 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
       name: "agent permission runtime",
       // Retain policy through every provider callback and durability drain;
       // release its DB reference and thread contexts only after they settle.
-      run: () => configureAgentPermissionRuntime(null),
+      run: () => releaseAgentPermissionRuntime(root.agentPermissionRuntime),
     },
     {
       name: "SQLite database",
@@ -683,10 +659,7 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
   ]
 
   await runShutdownSteps(cleanupSteps, ({ name, cause }) => {
-    logger.error(
-      { err: cause, step: name },
-      "shutdown step failed"
-    )
+    logger.error({ err: cause, step: name }, "shutdown step failed")
   })
   logger.info("Backend shutdown complete")
 }
@@ -707,7 +680,7 @@ export async function unwindStartup(root: BootRoot): Promise<void> {
     workspace: requestWorkspaceProcessShutdown,
   } = root.resourceShutdowns
   requestAdmission.beginDrain()
-  beginResourceManagerShutdowns()
+  beginResourceManagerShutdowns(root)
   // Start child termination before any potentially slow scheduler/service
   // cleanup. The bounded unwind below still awaits the shared promise.
   void requestGitProcessShutdown().catch((shutdownError) => {
@@ -737,10 +710,7 @@ export async function unwindStartup(root: BootRoot): Promise<void> {
   await runWithShutdownDeadline(
     () =>
       runShutdownSteps([...startupCleanup].reverse(), ({ name, cause }) => {
-        logger.error(
-          { err: cause, step: name },
-          "startup cleanup step failed"
-        )
+        logger.error({ err: cause, step: name }, "startup cleanup step failed")
       }),
     SHUTDOWN_HARD_TIMEOUT_MS,
     (timeoutError) => {

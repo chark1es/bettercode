@@ -9,10 +9,7 @@ import {
   canonicalizeExistingPath,
   normalizeBranchRef,
 } from "./refs"
-import {
-  invalidateStatusCache,
-  invalidateStatusCaches,
-} from "./status"
+import { invalidateStatusCache, invalidateStatusCaches } from "./status"
 
 // ─── Worktree operations (Phase 1 Objective 1) ───────────────────────────────
 // Everything in this section routes through `gitRun` so there's no shell
@@ -62,6 +59,31 @@ export async function createWorktree(
     path: canonicalizeExistingPath(worktreePath),
     branch: cleanBranch,
     base: cleanBase,
+  }
+}
+
+/**
+ * Create a git worktree at `worktreePath` checked out on the existing local
+ * branch `branch` (a pull request's branch), instead of a fresh one. Git
+ * refuses a branch already checked out in another worktree.
+ */
+export async function createWorktreeOnBranch(
+  cwd: string,
+  worktreePath: string,
+  branch: string
+): Promise<{ path: string; branch: string }> {
+  const cleanBranch = validateGitRefName(branch, "Branch")
+  await gitRun(cwd, [
+    "rev-parse",
+    "--verify",
+    "--end-of-options",
+    `refs/heads/${cleanBranch}^{commit}`,
+  ])
+  await gitRun(cwd, ["worktree", "add", "--", worktreePath, cleanBranch])
+  await invalidateStatusCaches(cwd, worktreePath)
+  return {
+    path: canonicalizeExistingPath(worktreePath),
+    branch: cleanBranch,
   }
 }
 

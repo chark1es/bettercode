@@ -194,7 +194,8 @@ function makeAdapter(
       managedSessions.delete(threadId)
     },
     hasSession: (threadId: ThreadId) =>
-      managedSessions.has(threadId) || (options.hasSession?.(threadId) ?? false),
+      managedSessions.has(threadId) ||
+      (options.hasSession?.(threadId) ?? false),
     subscribe: (listener) => {
       listeners.add(listener)
       options.onSubscribe?.(emit)
@@ -1287,7 +1288,9 @@ describe("ProviderHub", () => {
         modelId: "gpt-live",
         history: [],
       })
-    ).toThrowError(expect.objectContaining({ statusCode: 409, code: "turn_active" }))
+    ).toThrowError(
+      expect.objectContaining({ statusCode: 409, code: "turn_active" })
+    )
   })
 
   it("accepts and releases a turn token reserved by the HTTP admission boundary", async () => {
@@ -1350,7 +1353,10 @@ describe("ProviderHub", () => {
           turnId: "provider-turn-timeout",
           eventId: "turn-aborted-timeout",
           at: 2,
-          payload: { reason: "Turn timed out after 100ms.", status: "timed_out" },
+          payload: {
+            reason: "Turn timed out after 100ms.",
+            status: "timed_out",
+          },
         })
       })
       const observed: ProviderRuntimeEvent[] = []
@@ -1390,9 +1396,9 @@ describe("ProviderHub", () => {
       await vi.advanceTimersByTimeAsync(100)
 
       expect(interruptTurn).toHaveBeenCalledWith(
-      "thread-timeout",
-      expect.objectContaining({ interruptBudgetMs: expect.any(Number) })
-    )
+        "thread-timeout",
+        expect.objectContaining({ interruptBudgetMs: expect.any(Number) })
+      )
       expect(observed).toContainEqual(
         expect.objectContaining({
           type: "turn.aborted",
@@ -1412,6 +1418,162 @@ describe("ProviderHub", () => {
           history: [],
         })
       ).not.toThrow()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("re-arms the turn watchdog on provider activity and pauses it for open requests", async () => {
+    vi.useFakeTimers()
+    try {
+      let emitRuntimeEvent!: (event: ProviderRuntimeEvent) => void
+      const interruptTurn = vi.fn(async () => {
+        emitRuntimeEvent({
+          type: "turn.aborted",
+          threadId: "thread-idle",
+          turnId: "provider-turn-idle",
+          eventId: "turn-aborted-idle",
+          at: Date.now(),
+          payload: { reason: "timed out", status: "timed_out" },
+        })
+      })
+      const hub = new ProviderHub({
+        turnTimeoutMs: 100,
+        instances: [
+          {
+            instanceId: "codex",
+            driver: "codex",
+            provider: "codex",
+            enabled: true,
+            adapter: makeAdapter(true, {
+              interruptTurn,
+              onSubscribe: (emit) => {
+                emitRuntimeEvent = emit
+              },
+            }),
+          },
+        ],
+      })
+      const turn = hub.startTurn("codex", {
+        threadId: "thread-idle",
+        message: "long run",
+        modelId: "gpt-live",
+        history: [],
+      })
+      emitRuntimeEvent({
+        type: "turn.started",
+        threadId: "thread-idle",
+        turnId: "provider-turn-idle",
+        eventId: "turn-started-idle",
+        at: Date.now(),
+      })
+      await turn.completion
+
+      // A turn that keeps streaming outlives many idle windows.
+      for (let index = 0; index < 10; index++) {
+        await vi.advanceTimersByTimeAsync(60)
+        emitRuntimeEvent({
+          type: "content.delta",
+          threadId: "thread-idle",
+          turnId: "provider-turn-idle",
+          eventId: `delta-${index}`,
+          at: Date.now(),
+          payload: { streamKind: "assistant_text", delta: "." },
+        })
+      }
+      expect(interruptTurn).not.toHaveBeenCalled()
+
+      // Waiting for the user is not provider inactivity.
+      emitRuntimeEvent({
+        type: "request.opened",
+        threadId: "thread-idle",
+        turnId: "provider-turn-idle",
+        eventId: "request-opened-idle",
+        at: Date.now(),
+        requestId: "approval-1",
+        kind: "user_input",
+      } as ProviderRuntimeEvent)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(interruptTurn).not.toHaveBeenCalled()
+
+      emitRuntimeEvent({
+        type: "request.resolved",
+        threadId: "thread-idle",
+        turnId: "provider-turn-idle",
+        eventId: "request-resolved-idle",
+        at: Date.now(),
+        requestId: "approval-1",
+        decision: "answer",
+      } as ProviderRuntimeEvent)
+      await vi.advanceTimersByTimeAsync(60)
+      expect(interruptTurn).not.toHaveBeenCalled()
+
+      // Silence after the answer still times the turn out.
+      await vi.advanceTimersByTimeAsync(60)
+      expect(interruptTurn).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("interrupts a streaming turn at the absolute turn ceiling", async () => {
+    vi.useFakeTimers()
+    try {
+      let emitRuntimeEvent!: (event: ProviderRuntimeEvent) => void
+      const interruptTurn = vi.fn(async () => {
+        emitRuntimeEvent({
+          type: "turn.aborted",
+          threadId: "thread-ceiling",
+          turnId: "provider-turn-ceiling",
+          eventId: "turn-aborted-ceiling",
+          at: Date.now(),
+          payload: { reason: "ceiling", status: "timed_out" },
+        })
+      })
+      const hub = new ProviderHub({
+        turnTimeoutMs: 100,
+        turnMaxDurationMs: 300,
+        instances: [
+          {
+            instanceId: "codex",
+            driver: "codex",
+            provider: "codex",
+            enabled: true,
+            adapter: makeAdapter(true, {
+              interruptTurn,
+              onSubscribe: (emit) => {
+                emitRuntimeEvent = emit
+              },
+            }),
+          },
+        ],
+      })
+      const turn = hub.startTurn("codex", {
+        threadId: "thread-ceiling",
+        message: "endless",
+        modelId: "gpt-live",
+        history: [],
+      })
+      emitRuntimeEvent({
+        type: "turn.started",
+        threadId: "thread-ceiling",
+        turnId: "provider-turn-ceiling",
+        eventId: "turn-started-ceiling",
+        at: Date.now(),
+      })
+      await turn.completion
+      for (let index = 0; index < 4; index++) {
+        await vi.advanceTimersByTimeAsync(80)
+        emitRuntimeEvent({
+          type: "content.delta",
+          threadId: "thread-ceiling",
+          turnId: "provider-turn-ceiling",
+          eventId: `ceiling-delta-${index}`,
+          at: Date.now(),
+          payload: { streamKind: "assistant_text", delta: "." },
+        })
+      }
+      expect(interruptTurn).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }
@@ -1650,9 +1812,9 @@ describe("ProviderHub", () => {
 
       expect(turnFinished).toBe(false)
       expect(coordinator.activeOwner("thread-unkillable")).toBe("hub:codex")
-      expect(() =>
-        hub.assertCanStartTurn("codex", "another-thread")
-      ).toThrow(ProviderBackendQuarantinedError)
+      expect(() => hub.assertCanStartTurn("codex", "another-thread")).toThrow(
+        ProviderBackendQuarantinedError
+      )
       await expect(hub.listInstances()).resolves.toEqual([
         expect.objectContaining({
           instanceId: "codex",
@@ -1773,24 +1935,24 @@ describe("ProviderHub", () => {
           driver: "codex",
           provider: "codex",
           enabled: true,
-            adapter: makeAdapter(true, {
-              interruptTurn: vi.fn(async () => {
-                emitRuntimeEvent({
-                  type: "turn.aborted",
-                  threadId: "thread-teardown-failure",
-                  eventId: "turn-aborted-teardown-failure",
-                  at: 2,
-                  payload: {
-                    reason: "provider.threadTeardown",
-                    status: "interrupted",
-                  },
-                })
-                throw new Error("cannot interrupt")
-              }),
-              onSubscribe: (emit) => {
-                emitRuntimeEvent = emit
-              },
+          adapter: makeAdapter(true, {
+            interruptTurn: vi.fn(async () => {
+              emitRuntimeEvent({
+                type: "turn.aborted",
+                threadId: "thread-teardown-failure",
+                eventId: "turn-aborted-teardown-failure",
+                at: 2,
+                payload: {
+                  reason: "provider.threadTeardown",
+                  status: "interrupted",
+                },
+              })
+              throw new Error("cannot interrupt")
             }),
+            onSubscribe: (emit) => {
+              emitRuntimeEvent = emit
+            },
+          }),
         },
       ],
     })
@@ -1828,11 +1990,14 @@ describe("ProviderHub", () => {
       ],
     })
     let release!: () => void
-    const maintenance = hub.withThreadMaintenance("thread-maintenance", async () => {
-      await new Promise<void>((resolve) => {
-        release = resolve
-      })
-    })
+    const maintenance = hub.withThreadMaintenance(
+      "thread-maintenance",
+      async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+      }
+    )
 
     expect(() =>
       hub.startTurn("codex", {
@@ -1841,7 +2006,9 @@ describe("ProviderHub", () => {
         modelId: "gpt-live",
         history: [],
       })
-    ).toThrowError(expect.objectContaining({ statusCode: 409, code: "turn_active" }))
+    ).toThrowError(
+      expect.objectContaining({ statusCode: 409, code: "turn_active" })
+    )
     await expect(
       hub.withThreadMaintenance("thread-maintenance", async () => undefined)
     ).rejects.toMatchObject({ statusCode: 409, code: "turn_active" })
@@ -1849,11 +2016,11 @@ describe("ProviderHub", () => {
     release()
     await maintenance
     const admitted = hub.startTurn("codex", {
-        threadId: "thread-maintenance",
-        message: "now allowed",
-        modelId: "gpt-live",
-        history: [],
-      })
+      threadId: "thread-maintenance",
+      message: "now allowed",
+      modelId: "gpt-live",
+      history: [],
+    })
     await expect(
       hub.withThreadMaintenance("thread-maintenance", async () => undefined)
     ).rejects.toMatchObject({ statusCode: 409, code: "turn_active" })
@@ -3133,9 +3300,7 @@ describe("ProviderHub", () => {
     const first = hub.listInstances({ cwd: "/repo-a" })
     const overflow = hub.listInstances({ cwd: "/repo-b" })
 
-    await expect(overflow).rejects.toBeInstanceOf(
-      ProviderMetadataCapacityError
-    )
+    await expect(overflow).rejects.toBeInstanceOf(ProviderMetadataCapacityError)
     expect(projectProviderPolicyLoader).toHaveBeenCalledTimes(1)
 
     releasePolicy()
@@ -3313,9 +3478,7 @@ describe("ProviderHub", () => {
     const second = hub.refreshInstanceMetadata("codex-b")
     const overflow = hub.refreshInstanceMetadata("codex-c")
 
-    await expect(overflow).rejects.toBeInstanceOf(
-      ProviderMetadataCapacityError
-    )
+    await expect(overflow).rejects.toBeInstanceOf(ProviderMetadataCapacityError)
     expect(firstSkills).toHaveBeenCalledOnce()
     expect(secondSkills).not.toHaveBeenCalled()
     expect(thirdSkills).not.toHaveBeenCalled()
@@ -3333,9 +3496,9 @@ describe("ProviderHub", () => {
   it("rejects provider cwd keys that exceed the fixed input bound", () => {
     const hub = new ProviderHub({ instances: [] })
 
-    expect(() =>
-      hub.listInstances({ cwd: "x".repeat(4_097) })
-    ).toThrow(ProviderMetadataInputError)
+    expect(() => hub.listInstances({ cwd: "x".repeat(4_097) })).toThrow(
+      ProviderMetadataInputError
+    )
   })
 
   it("includes provider models in instance snapshots", async () => {
@@ -3396,7 +3559,11 @@ describe("ProviderHub", () => {
           displayName: "Remote",
           enabled: true,
           environment: [
-            { name: "REMOTE_TOKEN", value: "environment-secret", sensitive: true },
+            {
+              name: "REMOTE_TOKEN",
+              value: "environment-secret",
+              sensitive: true,
+            },
             { name: "LOG_LEVEL", value: "debug", sensitive: false },
           ],
           config: {
@@ -3507,7 +3674,7 @@ describe("ProviderHub", () => {
             status: "error",
             auth: { status: "unauthenticated" },
             message:
-              "Cursor Agent is not authenticated. Run `agent login` and try again.",
+              "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
           }),
         },
       ],
@@ -3522,11 +3689,11 @@ describe("ProviderHub", () => {
       version: "2026.04.08-abcdef",
       status: "error",
       auth: { status: "unauthenticated" },
-      // The adapter's own probe message is actionable ("Run `agent login`") and
+      // The adapter's own probe message is actionable ("Run `cursor-agent login`") and
       // is surfaced verbatim; the generic "authentication is required" string is
       // only a fallback for probes that report a bad status without a message.
       message:
-        "Cursor Agent is not authenticated. Run `agent login` and try again.",
+        "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
       models: [],
     })
     expect(availableModels).not.toHaveBeenCalled()
@@ -3755,11 +3922,13 @@ describe("ProviderHub", () => {
           adapter: makeAdapter(true),
         },
       ],
-      providerMaintenanceCommandRunner: vi.fn().mockRejectedValue(
-        new Error(
-          "spawn failed at C:\\private\\provider.json with token sk-sensitive"
-        )
-      ),
+      providerMaintenanceCommandRunner: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "spawn failed at C:\\private\\provider.json with token sk-sensitive"
+          )
+        ),
     })
 
     const result = await hub.updateProviderInstance("codex")
@@ -5009,8 +5178,7 @@ describe("ProviderHub", () => {
                       resumeCursor: {
                         providerThreadId: "codex-thread-1",
                       },
-                      continuationKey:
-                        "codex:home:/Users/example/.codex",
+                      continuationKey: "codex:home:/Users/example/.codex",
                       status: "ready",
                       cwd: "/Users/example/project",
                       activeTurnId: null,
@@ -5060,9 +5228,9 @@ describe("ProviderHub", () => {
           resumeCursor: null,
         })
       )
-      expect(
-        stopOldSession.mock.invocationCallOrder[0]
-      ).toBeLessThan(startSession.mock.invocationCallOrder[0] ?? 0)
+      expect(stopOldSession.mock.invocationCallOrder[0]).toBeLessThan(
+        startSession.mock.invocationCallOrder[0] ?? 0
+      )
       expect(startSession.mock.invocationCallOrder[0]).toBeLessThan(
         sendTurn.mock.invocationCallOrder[0] ?? 0
       )
@@ -5095,7 +5263,9 @@ describe("ProviderHub", () => {
   })
 
   it("fails provider switching closed when the previous session cannot be stopped", async () => {
-    const db = openDatabase(path.join(tempDir(), "provider-switch-failure.sqlite"))
+    const db = openDatabase(
+      path.join(tempDir(), "provider-switch-failure.sqlite")
+    )
     runMigrations(db)
     insertProviderHubTestThread(db, "thread-1")
     const bindings = new ProviderSessionBindingStore(db)
@@ -5457,112 +5627,127 @@ describe("ProviderHub", () => {
     }
   })
 
-  it.each([{ reason: "workspace", cwd: "/Users/example/project-worktree", refresh: false }, { reason: "orchestration tools", cwd: "/Users/example/project", refresh: true }])("restarts with the resume cursor when $reason changes", async ({ cwd, refresh }) => {
-    const modelSelection = {
-      instanceId: "claude-main",
-      model: "claude-opus-4-7",
-      options: [{ id: "effort", value: "max" }],
-    }
-    const startSession = vi.fn<ProviderAdapterShape["startSession"]>(
-      async (input) => ({
-        threadId: input.threadId,
-        providerInstanceId: "claude-main",
-        providerThreadId: "sdk-session-1",
-        resumeCursor: { sessionId: "sdk-session-1" },
-        continuationKey: "claude:home:/Users/example",
-        status: "ready",
-        cwd: input.cwd ?? null,
-        activeTurnId: null,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      })
-    )
-    const stopSession = vi.fn(async (_threadId: ThreadId) => {})
-    const sendTurn = vi.fn(async (_input: ProviderSendTurnInput) => {})
-    const bindings = {
-      get: vi.fn(() => ({
-        threadId: "thread-1",
-        providerKind: "claude",
-        providerInstanceId: "claude-main",
-        providerThreadId: "sdk-session-1",
-        resumeCursor: { sessionId: "sdk-session-1" },
-        continuationKey: "claude:home:/Users/example",
-        status: "ready",
-        activeTurnId: null,
-        lastError: null,
-        runtimeMode: "full-access",
-        cwd,
-        modelSelection,
-        createdAt: "2026-01-01T00:00:00.000Z",
-        updatedAt: "2026-01-01T00:00:02.000Z",
-      })),
-      list: vi.fn(() => []),
-      setProviderThreadId: vi.fn(),
-      updateSessionLifecycle: vi.fn(),
-    } as unknown as ProviderSessionBindingStore
-    const hub = new ProviderHub({
-      instances: [
-        {
-          instanceId: "claude-main",
-          driver: "claude",
-          provider: "claude",
+  it.each([
+    {
+      reason: "workspace",
+      cwd: "/Users/example/project-worktree",
+      refresh: false,
+    },
+    {
+      reason: "orchestration tools",
+      cwd: "/Users/example/project",
+      refresh: true,
+    },
+  ])(
+    "restarts with the resume cursor when $reason changes",
+    async ({ cwd, refresh }) => {
+      const modelSelection = {
+        instanceId: "claude-main",
+        model: "claude-opus-4-7",
+        options: [{ id: "effort", value: "max" }],
+      }
+      const startSession = vi.fn<ProviderAdapterShape["startSession"]>(
+        async (input) => ({
+          threadId: input.threadId,
+          providerInstanceId: "claude-main",
+          providerThreadId: "sdk-session-1",
+          resumeCursor: { sessionId: "sdk-session-1" },
           continuationKey: "claude:home:/Users/example",
-          displayName: "Claude Main",
-          enabled: true,
-          adapter: makeAdapter(true, {
-            hasSession: () => true, needsSessionConfigurationRefresh: async () => refresh,
-            listSessions: async () => [
-              {
-                threadId: "thread-1",
-                providerInstanceId: "claude-main",
-                providerThreadId: "sdk-session-1",
-                resumeCursor: { sessionId: "sdk-session-1" },
-                continuationKey: "claude:home:/Users/example",
-                status: "ready",
-                cwd: "/Users/example/project",
-                activeTurnId: null,
-                createdAt: 100,
-                updatedAt: 200,
-              },
-            ],
-            stopSession,
-            startSession,
-            sendTurn,
-          }),
+          status: "ready",
+          cwd: input.cwd ?? null,
+          activeTurnId: null,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        })
+      )
+      const stopSession = vi.fn(async (_threadId: ThreadId) => {})
+      const sendTurn = vi.fn(async (_input: ProviderSendTurnInput) => {})
+      const bindings = {
+        get: vi.fn(() => ({
+          threadId: "thread-1",
+          providerKind: "claude",
+          providerInstanceId: "claude-main",
+          providerThreadId: "sdk-session-1",
+          resumeCursor: { sessionId: "sdk-session-1" },
+          continuationKey: "claude:home:/Users/example",
+          status: "ready",
+          activeTurnId: null,
+          lastError: null,
+          runtimeMode: "full-access",
+          cwd,
+          modelSelection,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:02.000Z",
+        })),
+        list: vi.fn(() => []),
+        setProviderThreadId: vi.fn(),
+        updateSessionLifecycle: vi.fn(),
+      } as unknown as ProviderSessionBindingStore
+      const hub = new ProviderHub({
+        instances: [
+          {
+            instanceId: "claude-main",
+            driver: "claude",
+            provider: "claude",
+            continuationKey: "claude:home:/Users/example",
+            displayName: "Claude Main",
+            enabled: true,
+            adapter: makeAdapter(true, {
+              hasSession: () => true,
+              needsSessionConfigurationRefresh: async () => refresh,
+              listSessions: async () => [
+                {
+                  threadId: "thread-1",
+                  providerInstanceId: "claude-main",
+                  providerThreadId: "sdk-session-1",
+                  resumeCursor: { sessionId: "sdk-session-1" },
+                  continuationKey: "claude:home:/Users/example",
+                  status: "ready",
+                  cwd: "/Users/example/project",
+                  activeTurnId: null,
+                  createdAt: 100,
+                  updatedAt: 200,
+                },
+              ],
+              stopSession,
+              startSession,
+              sendTurn,
+            }),
+          },
+        ],
+      })
+
+      await hub.sendTurn(
+        "claude",
+        {
+          providerInstanceId: "claude-main",
+          threadId: "thread-1",
+          message: "continue in worktree",
+          modelId: "claude-opus-4-7",
+          projectPath: null,
+          history: [],
         },
-      ],
-    })
+        { bindings }
+      )
 
-    await hub.sendTurn(
-      "claude",
-      {
-        providerInstanceId: "claude-main",
-        threadId: "thread-1",
-        message: "continue in worktree",
-        modelId: "claude-opus-4-7",
-        projectPath: null,
-        history: [],
-      },
-      { bindings }
-    )
-
-    expect(stopSession).toHaveBeenCalledWith("thread-1")
-    expect(startSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        threadId: "thread-1",
-        cwd,
-        modelSelection,
-        resumeCursor: { sessionId: "sdk-session-1" },
-      })
-    )
-    expect(sendTurn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        providerInstanceId: "claude-main",
-        projectPath: cwd,
-        modelSelection,
-      })
-    )
-  })
+      expect(stopSession).toHaveBeenCalledWith("thread-1")
+      expect(startSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: "thread-1",
+          cwd,
+          modelSelection,
+          resumeCursor: { sessionId: "sdk-session-1" },
+        })
+      )
+      expect(sendTurn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerInstanceId: "claude-main",
+          projectPath: cwd,
+          modelSelection,
+        })
+      )
+    }
+  )
 
   it("restores the previous active session when a workspace restart fails", async () => {
     const events: ProviderRuntimeEvent[] = []
@@ -5864,12 +6049,12 @@ describe("ProviderHub", () => {
     })
 
     const rejected = hub.startTurn("codex", {
-        providerInstanceId: "codex-work",
-        threadId: "thread-1",
-        message: "hello",
-        modelId: "gpt-5.5",
-        history: [],
-      })
+      providerInstanceId: "codex-work",
+      threadId: "thread-1",
+      message: "hello",
+      modelId: "gpt-5.5",
+      history: [],
+    })
 
     const cleanupFailure = await rejected.completion.catch((error) => error)
     expect(cleanupFailure).toBeInstanceOf(ProviderStaleSessionCleanupError)
@@ -6233,11 +6418,7 @@ describe("ProviderHub", () => {
     await first.completion
 
     expect(() =>
-      hub.assertCanStartTurn(
-        "claude",
-        "turn-cap-global-2",
-        "claude-main"
-      )
+      hub.assertCanStartTurn("claude", "turn-cap-global-2", "claude-main")
     ).toThrow(ProviderTurnCapacityError)
     expect(() =>
       hub.startTurn("claude", {
@@ -6369,8 +6550,7 @@ describe("ProviderHub", () => {
           provider: "codex",
           enabled: true,
           adapter: makeAdapter(true, {
-            hasSession: (threadId) =>
-              threadId === existingSession.threadId,
+            hasSession: (threadId) => threadId === existingSession.threadId,
             listSessions: async () => [existingSession],
           }),
         },
@@ -6488,8 +6668,7 @@ describe("ProviderHub", () => {
           provider: "codex",
           enabled: true,
           adapter: makeAdapter(true, {
-            hasSession: (threadId) =>
-              threadId === existingSession.threadId,
+            hasSession: (threadId) => threadId === existingSession.threadId,
             listSessions: async () => [existingSession],
             startSession,
             sendTurn,

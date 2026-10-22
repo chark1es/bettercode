@@ -103,6 +103,13 @@ export interface AgentPermissionPolicyOptions {
    * `~/.claude/projects/<slug>/memory`. Defaults to `defaultAgentConfigRoots`.
    */
   readonly agentConfigRoots?: () => readonly string[]
+  /**
+   * Directories the application itself owns and creates (per-thread scratch
+   * workspaces for folderless chats). They hold no repository-chosen
+   * configuration, so an Agent turn there needs no trust decision even when
+   * automatic trust is off. Never records trust.
+   */
+  readonly isAppOwnedWorkspace?: (workspacePath: string) => boolean
 }
 
 /**
@@ -127,7 +134,8 @@ export function isAgentConfigPath(
   roots: readonly string[]
 ): boolean {
   const trimmed = candidate.trim()
-  if (!trimmed || trimmed.includes("\0") || !path.isAbsolute(trimmed)) return false
+  if (!trimmed || trimmed.includes("\0") || !path.isAbsolute(trimmed))
+    return false
   const absolute = path.resolve(trimmed.replace(/[\\/]+/g, path.sep))
   return roots.some((root) => {
     const normalizedRoot = path.resolve(root)
@@ -151,6 +159,7 @@ export class AgentPermissionPolicy {
   private readonly createId: () => string
   private readonly autoTrustWorkspaces: () => boolean
   private readonly agentConfigRoots: () => readonly string[]
+  private isAppOwnedWorkspace: (workspacePath: string) => boolean
   // Prepared once: evaluateTool/getWorkspaceTrust run on every tool call of
   // every turn, and better-sqlite3 re-plans SQL on each db.prepare.
   private readonly listAllGrantsStmt
@@ -167,6 +176,7 @@ export class AgentPermissionPolicy {
     this.createId = options.createId ?? randomUUID
     this.autoTrustWorkspaces = options.autoTrustWorkspaces ?? (() => false)
     this.agentConfigRoots = options.agentConfigRoots ?? defaultAgentConfigRoots
+    this.isAppOwnedWorkspace = options.isAppOwnedWorkspace ?? (() => false)
     // 'user' < 'workspace', so concatenating the two per-destination reads
     // reproduces this ORDER BY without a temp b-tree.
     const grantColumns = `
@@ -220,6 +230,17 @@ export class AgentPermissionPolicy {
       ON CONFLICT(workspace_path)
       DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at
     `)
+  }
+
+  /**
+   * Installs the app-owned workspace matcher after construction: the policy is
+   * built before the data directory's scratch tree is known to the provider
+   * bootstrap. See `AgentPermissionPolicyOptions.isAppOwnedWorkspace`.
+   */
+  configureAppOwnedWorkspaces(
+    matcher: ((workspacePath: string) => boolean) | null
+  ): void {
+    this.isAppOwnedWorkspace = matcher ?? (() => false)
   }
 
   listGrants(
@@ -420,7 +441,10 @@ export class AgentPermissionPolicy {
     try {
       workspacePath = normalizeWorkspaceRoot(input.workspacePath)
       toolName = normalizeAgentPermissionToolName(input.toolName)
-      if (input.path && isAgentConfigPath(input.path, this.agentConfigRoots())) {
+      if (
+        input.path &&
+        isAgentConfigPath(input.path, this.agentConfigRoots())
+      ) {
         // The CLI's own home is not a workspace escape. No workspace grant
         // can match an absolute path here, so the caller's level ceiling
         // (read-only, ask, allow-edits, bypass) decides, as it does for an
@@ -511,7 +535,8 @@ export class AgentPermissionPolicy {
     readonly workspacePath?: string | null
     readonly appMode?: string | null
   }): AgentTurnTrustDecision {
-    const isAgentMode = normalizeEffectiveAgentAppMode(input.appMode) === "agent"
+    const isAgentMode =
+      normalizeEffectiveAgentAppMode(input.appMode) === "agent"
     if (!input.workspacePath?.trim()) {
       if (!isAgentMode) return { decision: "allow", source: "default" }
       return {
@@ -546,6 +571,11 @@ export class AgentPermissionPolicy {
       }
     }
     if (isAgentMode && !trust.explicit) {
+      if (this.appOwnsWorkspace(trust.workspacePath)) {
+        // A folderless chat's private scratch directory: nothing in it was
+        // chosen by a repository, so there is nothing to consent to.
+        return { decision: "allow", source: "default" }
+      }
       if (this.autoTrustWorkspaces()) {
         // Recording the grant (rather than just allowing the turn) is what
         // makes repo-declared MCP servers and formatter commands work too —
@@ -565,6 +595,14 @@ export class AgentPermissionPolicy {
       }
     }
     return { decision: "allow", source: "default" }
+  }
+
+  private appOwnsWorkspace(workspacePath: string): boolean {
+    try {
+      return this.isAppOwnedWorkspace(workspacePath) === true
+    } catch {
+      return false
+    }
   }
 
   /**

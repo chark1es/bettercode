@@ -2,7 +2,7 @@ import fsSync from "node:fs"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { defaultSettings, type Settings } from "@betterc0de/schema"
 import type {
   AcpEvent,
@@ -13,22 +13,23 @@ import { BETTERC0DE_COMPAT_PROFILE } from "../provider/runtime/betterc0deCompat/
 import * as cursorBinaryResolution from "../provider/runtime/cursor/CursorBinaryResolution"
 import * as cursorRuntimeModule from "../provider/runtime/cursor/CursorAcpRuntime"
 import {
-  activeNativeTextGenerationResourceCount,
-  resumeNativeTextGenerationAdmissions,
-  runNativeTextGeneration,
-  shutdownAllNativeTextGenerationResources,
+  NativeTextGenerationService,
   type NativeTextGenerationRunner,
 } from "./native-text-generation"
 
+/** Each test gets its own operations, children, servers and admission. */
+let nativeText: NativeTextGenerationService
+
+beforeEach(() => {
+  nativeText = new NativeTextGenerationService()
+})
+
 afterEach(async () => {
   try {
-    await shutdownAllNativeTextGenerationResources()
+    await nativeText.shutdownAll()
   } finally {
     vi.unstubAllEnvs()
     vi.restoreAllMocks()
-    if (activeNativeTextGenerationResourceCount() === 0) {
-      resumeNativeTextGenerationAdmissions()
-    }
   }
 })
 
@@ -77,7 +78,7 @@ describe("native provider text generation", () => {
       onPermissionRequest: vi.fn(),
     } as unknown as AcpRuntime
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "grok-retained",
@@ -98,22 +99,22 @@ describe("native provider text generation", () => {
       )
     ).rejects.toThrow("request and process cleanup both failed")
     expect((await fs.stat(directory)).isDirectory()).toBe(true)
-    expect(activeNativeTextGenerationResourceCount()).toBe(1)
-    expect(() => resumeNativeTextGenerationAdmissions()).toThrow(
+    expect(nativeText.activeResourceCount()).toBe(1)
+    expect(() => nativeText.resumeAdmissions()).toThrow(
       "previous resources remain active"
     )
     await expect(
-      runNativeTextGeneration({
+      nativeText.run({
         settings: defaultSettings(),
         modelSelection: null,
         prompt: "blocked",
         schemaName: "threadTitle",
       })
     ).rejects.toMatchObject({ code: "NATIVE_TEXT_GENERATION_ADMISSION_CLOSED" })
-    await expect(shutdownAllNativeTextGenerationResources()).resolves.toBe(1)
+    await expect(nativeText.shutdownAll()).resolves.toBe(1)
     await expect(fs.stat(directory)).rejects.toMatchObject({ code: "ENOENT" })
     expect(close).toHaveBeenCalledTimes(2)
-    expect(activeNativeTextGenerationResourceCount()).toBe(0)
+    expect(nativeText.activeResourceCount()).toBe(0)
   })
 
   it("rejects an unverified Cursor binary before constructing the production runtime", async () => {
@@ -126,7 +127,7 @@ describe("native provider text generation", () => {
         throw new Error("unverified executable reached runtime")
       })
     await expect(
-      runNativeTextGeneration({
+      nativeText.run({
         settings: settingsWithInstance({
           instanceId: "cursor-unverified",
           driver: "cursor-agent",
@@ -189,7 +190,7 @@ describe("native provider text generation", () => {
         onExtNotification: vi.fn(),
       }
       const createGrokRuntime = vi.fn(() => runtime)
-      const result = runNativeTextGeneration(
+      const result = nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "grok-source",
@@ -245,7 +246,7 @@ describe("native provider text generation", () => {
       binaryPath: "claude-test",
     })
     const generate = (prompt: string) =>
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings,
           modelSelection: {
@@ -307,11 +308,11 @@ describe("native provider text generation", () => {
       schemaName: "threadTitle" as const,
     }
 
-    const first = runNativeTextGeneration(input, runner)
+    const first = nativeText.run(input, runner)
     await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1))
-    const second = runNativeTextGeneration(input, runner)
+    const second = nativeText.run(input, runner)
     const thirdRejection = expect(
-      runNativeTextGeneration(input, runner)
+      nativeText.run(input, runner)
     ).rejects.toMatchObject({
       code: "NATIVE_TEXT_GENERATION_QUEUE_FULL",
       statusCode: 503,
@@ -360,9 +361,9 @@ describe("native provider text generation", () => {
       schemaName: "threadTitle" as const,
     }
 
-    const active = runNativeTextGeneration(input, runner)
+    const active = nativeText.run(input, runner)
     await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1))
-    const queued = runNativeTextGeneration(input, runner)
+    const queued = nativeText.run(input, runner)
     const activeRejection = expect(active).rejects.toMatchObject({
       code: "NATIVE_TEXT_GENERATION_SHUTDOWN",
     })
@@ -370,12 +371,10 @@ describe("native provider text generation", () => {
       code: "NATIVE_TEXT_GENERATION_SHUTDOWN",
     })
 
-    await expect(
-      shutdownAllNativeTextGenerationResources()
-    ).resolves.toBeGreaterThanOrEqual(2)
+    await expect(nativeText.shutdownAll()).resolves.toBeGreaterThanOrEqual(2)
     await Promise.all([activeRejection, queuedRejection])
     expect(runner.run).toHaveBeenCalledTimes(1)
-    expect(activeNativeTextGenerationResourceCount()).toBe(0)
+    expect(nativeText.activeResourceCount()).toBe(0)
   })
 
   it("does not invoke a runner when shutdown wins before spawn", async () => {
@@ -387,7 +386,7 @@ describe("native provider text generation", () => {
         signal: null,
       })),
     }
-    const running = runNativeTextGeneration(
+    const running = nativeText.run(
       {
         settings: settingsWithInstance({
           instanceId: "claude-abort-before-spawn",
@@ -407,9 +406,7 @@ describe("native provider text generation", () => {
       code: "NATIVE_TEXT_GENERATION_SHUTDOWN",
     })
 
-    await expect(
-      shutdownAllNativeTextGenerationResources()
-    ).resolves.toBeGreaterThanOrEqual(1)
+    await expect(nativeText.shutdownAll()).resolves.toBeGreaterThanOrEqual(1)
     await rejection
     expect(runner.run).not.toHaveBeenCalled()
   })
@@ -447,7 +444,7 @@ describe("native provider text generation", () => {
       await fs.chmod(binaryPath, 0o755)
 
       await expect(
-        runNativeTextGeneration({
+        nativeText.run({
           settings: settingsWithInstance({
             instanceId: "codex-timeout-tree",
             driver: "codex",
@@ -519,7 +516,7 @@ describe("native provider text generation", () => {
       )
       await fs.chmod(binaryPath, 0o755)
 
-      const running = runNativeTextGeneration({
+      const running = nativeText.run({
         settings: settingsWithInstance({
           instanceId: "codex-shutdown-tree",
           driver: "codex",
@@ -541,12 +538,10 @@ describe("native provider text generation", () => {
         expect(descendantPid).toBeGreaterThan(0)
       })
 
-      await expect(
-        shutdownAllNativeTextGenerationResources()
-      ).resolves.toBeGreaterThanOrEqual(2)
+      await expect(nativeText.shutdownAll()).resolves.toBeGreaterThanOrEqual(2)
       await rejection
       expect(isProcessRunning(descendantPid!)).toBe(false)
-      expect(activeNativeTextGenerationResourceCount()).toBe(0)
+      expect(nativeText.activeResourceCount()).toBe(0)
     } finally {
       if (descendantPid && isProcessRunning(descendantPid)) {
         try {
@@ -591,7 +586,7 @@ describe("native provider text generation", () => {
       )
       await fs.chmod(binaryPath, 0o755)
 
-      const running = runNativeTextGeneration({
+      const running = nativeText.run({
         settings: settingsWithInstance({
           instanceId: "betterc0de-startup-shutdown",
           driver: "betterc0de",
@@ -611,17 +606,13 @@ describe("native provider text generation", () => {
         serverPid = Number.parseInt(await fs.readFile(pidFile, "utf8"), 10)
         expect(serverPid).toBeGreaterThan(0)
       })
-      expect(activeNativeTextGenerationResourceCount()).toBeGreaterThanOrEqual(
-        2
-      )
+      expect(nativeText.activeResourceCount()).toBeGreaterThanOrEqual(2)
 
-      await expect(
-        shutdownAllNativeTextGenerationResources()
-      ).resolves.toBeGreaterThanOrEqual(2)
+      await expect(nativeText.shutdownAll()).resolves.toBeGreaterThanOrEqual(2)
       await rejection
       expect(isProcessRunning(serverPid!)).toBe(false)
-      expect(activeNativeTextGenerationResourceCount()).toBe(0)
-      resumeNativeTextGenerationAdmissions()
+      expect(nativeText.activeResourceCount()).toBe(0)
+      nativeText.resumeAdmissions()
     } finally {
       if (serverPid && isProcessRunning(serverPid)) {
         try {
@@ -645,7 +636,7 @@ describe("native provider text generation", () => {
       },
     }
 
-    await runNativeTextGeneration(
+    await nativeText.run(
       {
         settings: settingsWithInstance({
           instanceId: "codex-safe-env",
@@ -690,7 +681,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "codex-work",
@@ -749,7 +740,7 @@ describe("native provider text generation", () => {
     })
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "codex-work",
@@ -783,7 +774,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "codex-oversized-output",
@@ -822,7 +813,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "claude-work",
@@ -874,7 +865,7 @@ describe("native provider text generation", () => {
     })
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "claude-work",
@@ -914,7 +905,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "claude-terminal",
@@ -990,7 +981,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "betterc0de-work",
@@ -1085,7 +1076,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "betterc0de-external-cleanup",
@@ -1103,19 +1094,17 @@ describe("native provider text generation", () => {
         runner
       )
     ).rejects.toThrow("external session delete failed")
-    expect(activeNativeTextGenerationResourceCount()).toBe(1)
+    expect(nativeText.activeResourceCount()).toBe(1)
     expect(sessionDelete).toHaveBeenCalledTimes(1)
 
-    await expect(
-      shutdownAllNativeTextGenerationResources()
-    ).rejects.toMatchObject({ name: "AggregateError" })
-    expect(activeNativeTextGenerationResourceCount()).toBe(1)
+    await expect(nativeText.shutdownAll()).rejects.toMatchObject({
+      name: "AggregateError",
+    })
+    expect(nativeText.activeResourceCount()).toBe(1)
     expect(sessionDelete).toHaveBeenCalledTimes(2)
 
-    await expect(
-      shutdownAllNativeTextGenerationResources()
-    ).resolves.toBeGreaterThanOrEqual(1)
-    expect(activeNativeTextGenerationResourceCount()).toBe(0)
+    await expect(nativeText.shutdownAll()).resolves.toBeGreaterThanOrEqual(1)
+    expect(nativeText.activeResourceCount()).toBe(0)
     expect(sessionDelete).toHaveBeenCalledTimes(3)
     expect(close).toHaveBeenCalledOnce()
   })
@@ -1164,20 +1153,18 @@ describe("native provider text generation", () => {
       schemaName: "threadTitle" as const,
     }
 
-    await expect(runNativeTextGeneration(input, runner)).rejects.toThrow(
+    await expect(nativeText.run(input, runner)).rejects.toThrow(
       "delete unavailable"
     )
-    await expect(runNativeTextGeneration(input, runner)).rejects.toMatchObject({
+    await expect(nativeText.run(input, runner)).rejects.toMatchObject({
       code: "NATIVE_TEXT_GENERATION_CLEANUP_BACKLOG_FULL",
       statusCode: 503,
     })
     expect(connectBetterC0deServer).toHaveBeenCalledTimes(1)
-    expect(activeNativeTextGenerationResourceCount()).toBe(1)
+    expect(nativeText.activeResourceCount()).toBe(1)
 
-    await expect(
-      shutdownAllNativeTextGenerationResources()
-    ).resolves.toBeGreaterThanOrEqual(1)
-    expect(activeNativeTextGenerationResourceCount()).toBe(0)
+    await expect(nativeText.shutdownAll()).resolves.toBeGreaterThanOrEqual(1)
+    expect(nativeText.activeResourceCount()).toBe(0)
   })
 
   it("extracts the first balanced BetterC0de compatibility JSON object", async () => {
@@ -1211,7 +1198,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "betterc0de-work",
@@ -1268,7 +1255,7 @@ describe("native provider text generation", () => {
         binaryPath: "betterc0de-test",
       })
 
-      await runNativeTextGeneration(
+      await nativeText.run(
         {
           settings,
           modelSelection: {
@@ -1280,7 +1267,7 @@ describe("native provider text generation", () => {
         },
         runner
       )
-      await runNativeTextGeneration(
+      await nativeText.run(
         {
           settings,
           modelSelection: {
@@ -1354,8 +1341,8 @@ describe("native provider text generation", () => {
         schemaName: "threadTitle" as const,
       }
 
-      const first = runNativeTextGeneration(input, runner)
-      const second = runNativeTextGeneration(input, runner)
+      const first = nativeText.run(input, runner)
+      const second = nativeText.run(input, runner)
       await vi.waitFor(() =>
         expect(connectBetterC0deServer).toHaveBeenCalledTimes(1)
       )
@@ -1437,21 +1424,21 @@ describe("native provider text generation", () => {
       schemaName: "threadTitle" as const,
     })
 
-    const first = runNativeTextGeneration(
+    const first = nativeText.run(
       makeInput("betterc0de-fingerprint-a", "betterc0de-shared", "secret-one"),
       runner
     )
     await vi.waitFor(() =>
       expect(connectBetterC0deServer).toHaveBeenCalledTimes(1)
     )
-    const second = runNativeTextGeneration(
+    const second = nativeText.run(
       makeInput("betterc0de-fingerprint-b", "betterc0de-shared", "secret-two"),
       runner
     )
     await vi.waitFor(() =>
       expect(connectBetterC0deServer).toHaveBeenCalledTimes(2)
     )
-    const third = runNativeTextGeneration(
+    const third = nativeText.run(
       makeInput("betterc0de-fingerprint-c", "betterc0de-other", "secret-two"),
       runner
     )
@@ -1495,7 +1482,7 @@ describe("native provider text generation", () => {
         },
       })),
     }
-    await runNativeTextGeneration(
+    await nativeText.run(
       {
         settings: settingsWithInstance({
           instanceId: "betterc0de-close-retry",
@@ -1512,17 +1499,15 @@ describe("native provider text generation", () => {
       runner
     )
 
-    await expect(
-      shutdownAllNativeTextGenerationResources()
-    ).rejects.toMatchObject({ name: "AggregateError" })
-    expect(activeNativeTextGenerationResourceCount()).toBe(1)
+    await expect(nativeText.shutdownAll()).rejects.toMatchObject({
+      name: "AggregateError",
+    })
+    expect(nativeText.activeResourceCount()).toBe(1)
 
-    await expect(
-      shutdownAllNativeTextGenerationResources()
-    ).resolves.toBeGreaterThanOrEqual(1)
-    expect(activeNativeTextGenerationResourceCount()).toBe(0)
+    await expect(nativeText.shutdownAll()).resolves.toBeGreaterThanOrEqual(1)
+    expect(nativeText.activeResourceCount()).toBe(0)
     expect(close).toHaveBeenCalledTimes(2)
-    resumeNativeTextGenerationAdmissions()
+    nativeText.resumeAdmissions()
   })
 
   it("aborts active compatibility requests and drains their shared server on shutdown", async () => {
@@ -1544,7 +1529,7 @@ describe("native provider text generation", () => {
         },
       })),
     }
-    const running = runNativeTextGeneration(
+    const running = nativeText.run(
       {
         settings: settingsWithInstance({
           instanceId: "betterc0de-shutdown",
@@ -1565,14 +1550,12 @@ describe("native provider text generation", () => {
     })
     await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce())
 
-    await expect(
-      shutdownAllNativeTextGenerationResources()
-    ).resolves.toBeGreaterThanOrEqual(2)
+    await expect(nativeText.shutdownAll()).resolves.toBeGreaterThanOrEqual(2)
     await rejection
     expect(close).toHaveBeenCalledOnce()
-    expect(activeNativeTextGenerationResourceCount()).toBe(0)
+    expect(nativeText.activeResourceCount()).toBe(0)
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: defaultSettings(),
           modelSelection: null,
@@ -1584,7 +1567,7 @@ describe("native provider text generation", () => {
     ).rejects.toMatchObject({
       code: "NATIVE_TEXT_GENERATION_ADMISSION_CLOSED",
     })
-    resumeNativeTextGenerationAdmissions()
+    nativeText.resumeAdmissions()
   })
 
   it("times out an unresponsive compatibility prompt and releases the server", async () => {
@@ -1608,7 +1591,7 @@ describe("native provider text generation", () => {
           },
         })),
       }
-      const promise = runNativeTextGeneration(
+      const promise = nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "betterc0de-timeout",
@@ -1734,7 +1717,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "cursor-work",
@@ -1811,7 +1794,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "cursor-no-ask",
@@ -1886,7 +1869,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "cursor-oversized",
@@ -1920,7 +1903,7 @@ describe("native provider text generation", () => {
     }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "zed",
@@ -1961,7 +1944,7 @@ describe("Codex CLI argument hygiene", () => {
     const runner: NativeTextGenerationRunner = { run }
 
     await expect(
-      runNativeTextGeneration(
+      nativeText.run(
         {
           settings: settingsWithInstance({
             instanceId: "codex-effort",
@@ -1995,7 +1978,7 @@ describe("Codex CLI argument hygiene", () => {
       },
     }
 
-    await runNativeTextGeneration(
+    await nativeText.run(
       {
         settings: settingsWithInstance({
           instanceId: "codex-cwd",

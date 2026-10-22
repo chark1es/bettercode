@@ -10,6 +10,9 @@ import type { UiProvider } from "@/lib/provider-types"
 const rendered = vi.hoisted(() => ({
   input: null as ComponentProps<typeof ChatInputArea> | null,
 }))
+// Read through a call, so `rendered.input = null` in a test does not narrow
+// later reads to null after another render.
+const lastInput = () => rendered.input
 vi.mock("@/components/layout/chat-top-bar", () => ({ ChatTopBar: () => null }))
 vi.mock("@/components/chat/chat-transcript", () => ({
   ChatTranscript: () => null,
@@ -22,6 +25,7 @@ vi.mock("@/components/layout/agent-terminal-diff", () => ({
 }))
 vi.mock("@/hooks/use-chat-streaming-state", () => ({
   useChatStreamingState: () => ({ allPlans: [], isStreaming: false }),
+  useThreadPersistedPlans: () => [],
 }))
 vi.mock("@/components/chat/chat-input-area", () => ({
   ChatInputArea: (props: ComponentProps<typeof ChatInputArea>) => {
@@ -120,7 +124,8 @@ describe("chat pane composer", () => {
     })
     const otherSettings = useChatStore.getState().settingsByThread.a
     const handleSubmit = vi.fn()
-    const props: ComponentProps<typeof ChatColumn> = {
+    type Props = ComponentProps<typeof ChatColumn>
+    const props: Props = {
       threadId: "b",
       tabId: "pane-b",
       isActive: false,
@@ -138,24 +143,8 @@ describe("chat pane composer", () => {
       thinkingMode: "low",
       specialMode: null,
       permissionLevel: "bypass",
-      mentionQuery: "",
-      mentionActive: false,
-      slashActive: false,
-      slashQuery: "",
-      slashTrigger: "/",
-      closeMention: vi.fn(),
-      closeSlash: vi.fn(),
-      handleSlashSelect: vi.fn(),
-      autonomousMode: false,
-      autonomousStatus: "idle",
-      autonomousIterations: 0,
-      autonomousMaxIterations: 1,
-      autonomousTask: null,
-      autonomousTaskList: [],
-      autonomousTimeBudgetMin: 0,
-      autonomousStartedAt: null,
-      autonomousStopReason: null,
-      deepgram: null,
+      // The composer is mocked; it never reads these.
+      deepgram: null as unknown as Props["deepgram"],
       terminalOpen: false,
       setTerminalOpen: vi.fn(),
       diffOpen: false,
@@ -168,17 +157,33 @@ describe("chat pane composer", () => {
         currentModelName: "GPT-5.6 Sol",
         thinkingMode: "low",
         permissionLevel: "bypass",
-      },
+      } as unknown as Props["composerProps"],
     }
     const html = renderToStaticMarkup(createElement(ChatColumn, props))
     expect(html).toContain('aria-label="GPT-6 Astra"')
     expect(html).toContain("ultra")
     expect(html).not.toContain("GPT-5.6 Sol")
     expect(html).not.toContain("data-editor-empty-chat")
-    useChatStore.setState({ threads: [{ id: "b", title: "B", projectName: "B", projectPath: "/repo-b", messages: [], createdAt: "2026-09-13T00:00:00Z", updatedAt: "2026-09-13T00:00:00Z" }] })
-    const emptyEditor = renderToStaticMarkup(createElement(ChatColumn, { ...props, appMode: "editor" }))
+    useChatStore.setState({
+      threads: [
+        {
+          id: "b",
+          title: "B",
+          projectName: "B",
+          projectPath: "/repo-b",
+          messages: [],
+          createdAt: "2026-09-13T00:00:00Z",
+          updatedAt: "2026-09-13T00:00:00Z",
+        },
+      ],
+    })
+    const emptyEditor = renderToStaticMarkup(
+      createElement(ChatColumn, { ...props, appMode: "editor" })
+    )
     expect(emptyEditor).toContain("data-editor-empty-chat")
-    expect(emptyEditor.indexOf("data-editor-empty-chat")).toBeLessThan(emptyEditor.indexOf('aria-label="GPT-6 Astra"'))
+    expect(emptyEditor.indexOf("data-editor-empty-chat")).toBeLessThan(
+      emptyEditor.indexOf('aria-label="GPT-6 Astra"')
+    )
     useChatStore.setState({ threads: [] })
     expect(rendered.input?.permissionLevel).toBe("read-only")
     expect(rendered.input?.composerProps.fastMode).toBe(true)
@@ -192,11 +197,13 @@ describe("chat pane composer", () => {
         ?.codex.thinkingMode
     ).toBe("medium")
     expect(useChatStore.getState().settingsByThread.a).toBe(otherSettings)
-    rendered.input?.setPlanModalContent("Implement this plan")
-    expect(props.setPlanModalContent).toHaveBeenCalledWith(expect.objectContaining({
-      content: "Implement this plan",
-      threadId: "b",
-    }))
+    rendered.input?.setPlanModalContent?.("Implement this plan")
+    expect(props.setPlanModalContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "Implement this plan",
+        threadId: "b",
+      })
+    )
     await rendered.input?.composerProps.handleSubmit({
       text: "Hello",
       files: [],
@@ -207,17 +214,21 @@ describe("chat pane composer", () => {
       files: [],
     })
     rendered.input = null
-    const unavailable = renderToStaticMarkup(createElement(ChatColumn, { ...props, appMode: "editor" }))
+    const unavailable = renderToStaticMarkup(
+      createElement(ChatColumn, { ...props, appMode: "editor" })
+    )
     expect(unavailable).toContain("Conversation unavailable")
     expect(rendered.input).toBeNull()
 
     // Canvas mode mounts this same column: per-thread settings, the shared
     // composer, no editor-only chrome or gate.
-    const design = renderToStaticMarkup(createElement(ChatColumn, { ...props, appMode: "design" }))
+    const design = renderToStaticMarkup(
+      createElement(ChatColumn, { ...props, appMode: "design" })
+    )
     expect(design).toContain('aria-label="GPT-6 Astra"')
     expect(design).not.toContain("Conversation unavailable")
     expect(design).not.toContain("data-editor-empty-chat")
-    expect(rendered.input?.composerProps.appMode).toBe("design")
-    expect(rendered.input?.composerProps.minimalChat).toBe(true)
+    expect(lastInput()?.composerProps.appMode).toBe("design")
+    expect(lastInput()?.composerProps.minimalChat).toBe(true)
   })
 })

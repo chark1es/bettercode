@@ -151,10 +151,7 @@ export function decodeThreadActivityCursor(
   raw: string | null | undefined
 ): ThreadActivityCursor | null | false {
   if (raw === undefined || raw === null || raw.trim() === "") return null
-  if (
-    raw.length > 2_048 ||
-    !/^[A-Za-z0-9_-]+$/.test(raw)
-  ) {
+  if (raw.length > 2_048 || !/^[A-Za-z0-9_-]+$/.test(raw)) {
     return false
   }
   try {
@@ -694,15 +691,12 @@ export class CheckpointDiffProjectionQuery {
     // The journal drops oversized patches whole, retaining the checkpoint refs
     // and summary. Project that summary so admission recovery can acknowledge
     // it; an unmarked missing patch must still be ignored.
-    const diffText = payloadText(
-      payload,
-      "unifiedDiff",
-      "unified_diff",
-      "diff"
-    ) ?? (
-      payload.diffTruncated === true &&
-      payload.diffTruncationReason === "journal_limit" ? "" : null
-    )
+    const diffText =
+      payloadText(payload, "unifiedDiff", "unified_diff", "diff") ??
+      (payload.diffTruncated === true &&
+      payload.diffTruncationReason === "journal_limit"
+        ? ""
+        : null)
     if (diffText === null) return
 
     const files = diffFilesFromPayload(payload, diffText)
@@ -731,11 +725,7 @@ export class CheckpointDiffProjectionQuery {
       (checkpointTurnId
         ? this.findCheckpointRefForTurn(event.thread_id, checkpointTurnId)
         : null) ??
-      placeholderCheckpointRefForRuntimeDiff(
-        event,
-        payload,
-        checkpointTurnId
-      )
+      placeholderCheckpointRefForRuntimeDiff(event, payload, checkpointTurnId)
     const diffBlobId = createHash("sha256").update(diffText).digest("hex")
 
     const txn = this.db.transaction(() => {
@@ -829,9 +819,7 @@ export class CheckpointDiffProjectionQuery {
       const dispatchBoundary = this.findDispatchMessageBoundaryStmt.get(
         threadId,
         dispatchTurnId
-      ) as
-        | (BoundaryRow & { next_dispatch_sequence: number | null })
-        | undefined
+      ) as (BoundaryRow & { next_dispatch_sequence: number | null }) | undefined
       if (dispatchBoundary) {
         const assistantBoundary =
           this.findAssistantBoundaryAfterDispatchStmt.get(
@@ -912,7 +900,8 @@ export class CheckpointDiffProjectionQuery {
     const row = this.latestTurnIndexStmt.get(threadId) as
       | { turn_index: number | null }
       | undefined
-    return typeof row?.turn_index === "number" && Number.isFinite(row.turn_index)
+    return typeof row?.turn_index === "number" &&
+      Number.isFinite(row.turn_index)
       ? Math.max(0, Math.trunc(row.turn_index))
       : 0
   }
@@ -920,6 +909,7 @@ export class CheckpointDiffProjectionQuery {
 
 export class ThreadActivityProjectionQuery {
   private readonly payloadByIdStmt
+  private readonly findByIdStmt
   private readonly upsertStmt
   private readonly listNewestByThreadStmt
   private readonly listBeforeSequenceStmt
@@ -929,7 +919,24 @@ export class ThreadActivityProjectionQuery {
   private readonly deleteByThreadStmt
 
   constructor(db: Db) {
-    this.payloadByIdStmt = db.prepare("SELECT payload_json FROM projection_thread_activities WHERE thread_id = ? AND activity_id = ?")
+    this.payloadByIdStmt = db.prepare(
+      "SELECT payload_json FROM projection_thread_activities WHERE thread_id = ? AND activity_id = ?"
+    )
+    this.findByIdStmt = db.prepare(`
+      SELECT
+        activity_id,
+        thread_id,
+        turn_id,
+        provider_instance_id,
+        kind,
+        tone,
+        summary,
+        payload_json,
+        sequence,
+        created_at
+      FROM projection_thread_activities
+      WHERE thread_id = ? AND activity_id = ?
+    `)
     this.upsertStmt = db.prepare(`
       INSERT INTO projection_thread_activities
         (activity_id, thread_id, turn_id, provider_instance_id, kind, tone, summary, payload_json, sequence, created_at)
@@ -1179,8 +1186,37 @@ export class ThreadActivityProjectionQuery {
   payloadById(threadId: string, activityId: string): unknown {
     const row: unknown = this.payloadByIdStmt.get(threadId, activityId)
     if (row === undefined) return undefined
-    if (typeof row !== "object" || row === null || !("payload_json" in row) || typeof row.payload_json !== "string") throw new Error("Invalid persisted activity payload")
+    if (
+      typeof row !== "object" ||
+      row === null ||
+      !("payload_json" in row) ||
+      typeof row.payload_json !== "string"
+    )
+      throw new Error("Invalid persisted activity payload")
     return JSON.parse(row.payload_json)
+  }
+
+  /** One activity of this thread, or null (also when the id belongs to another thread). */
+  findById(
+    threadId: string,
+    activityId: string
+  ): ThreadActivityProjection | null {
+    const row = this.findByIdStmt.get(threadId, activityId) as
+      | ThreadActivityRow
+      | undefined
+    if (!row) return null
+    return {
+      activity_id: row.activity_id,
+      thread_id: row.thread_id,
+      turn_id: row.turn_id,
+      provider_instance_id: row.provider_instance_id,
+      kind: row.kind,
+      tone: row.tone,
+      summary: row.summary,
+      payload: parseActivityPayload(row),
+      sequence: row.sequence,
+      created_at: row.created_at,
+    }
   }
 
   /**
@@ -1248,9 +1284,7 @@ function boundedPageLimit(value: number | undefined, fallback: number): number {
 function validNonnegativeInteger(
   value: number | null | undefined
 ): number | null {
-  return typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value >= 0
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value
     : null
 }

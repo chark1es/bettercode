@@ -15,15 +15,19 @@ export function forwardedClientAddress(
 ): string | null {
   const raw = Array.isArray(header) ? header[header.length - 1] : header
   if (typeof raw !== "string") return null
-  const hops = raw.split(",").map((part) => part.trim()).filter(Boolean)
+  const hops = raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
   return hops.length > 0 ? hops[hops.length - 1]! : null
 }
 
 /**
  * Addresses that only exist inside a home, office or VPN network: RFC 1918,
  * link-local, and the IPv6 ULA / link-local ranges. A plaintext request from
- * such a peer qualifies for BetterC0de's private-network pairing policy and
- * gets a full session without TLS. Deliberately excludes the
+ * such a peer qualifies for BetterC0de's private-network pairing policy: it
+ * may pair without TLS, but only as short read-only monitoring, since a
+ * private address is not encryption. Deliberately excludes the
  * Tailscale CGNAT range 100.64/10: an ISP can hand that out on a physical
  * interface shared with strangers, so it only counts when the packets
  * demonstrably arrived through the tailnet (`requestPeerIsTailnet`).
@@ -53,15 +57,18 @@ export function isPrivateLanAddress(address: string): boolean {
     const parts = normalized.split(".").map(Number)
     const [a, b] = parts as [number, number, number, number]
     return (
-      a === 10
-      || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168)
-      || (a === 169 && b === 254)
+      a === 10 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 169 && b === 254)
     )
   }
   if (family === 6) {
     // fc00::/7 (ULA) and fe80::/10 (link-local).
-    return /^f[cd][0-9a-f]{2}:/.test(normalized) || /^fe[89ab][0-9a-f]:/.test(normalized)
+    return (
+      /^f[cd][0-9a-f]{2}:/.test(normalized) ||
+      /^fe[89ab][0-9a-f]:/.test(normalized)
+    )
   }
   return false
 }

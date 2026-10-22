@@ -1,9 +1,11 @@
 /**
  * Minimal-mode footer for the chat composer — Codex-desktop-style layout:
  *
- *   [+] [permissions ▾]                 [⚡ model · reasoning ▾] [mic] [⬆]
+ *   [+] [permissions ▾]             [⚡ model · reasoning ▾] [◔] [mic] [⬆]
  *
- * - "+" menu: Files and folders, plus experimental orchestration.
+ * - "◔" ring: context window meter (`composer-context-meter.tsx`).
+ * - "+" menu: Files and folders.
+ * - Orchestration icon: model pool, directly before permissions.
  * - There is no Mode picker: Agent is the default and Plan is toggled with
  *   Shift+Tab, so the one thing left to choose in the input row is how far
  *   the agent may act on its own.
@@ -19,8 +21,15 @@ import { cn } from "@/lib/utils"
 import { chatModeLabel } from "@/lib/chat-mode-labels"
 import type { ComposerFooterProps } from "./chat-composer-types"
 import { ComposerOrchestrationMenu } from "./composer-orchestration"
+import {
+  CompareChipModels,
+  ComposerCompareHint,
+  ComposerCompareMenuRows,
+  useComposerCompare,
+} from "./composer-compare"
 import { ProviderIcon } from "@/components/provider-icon"
 import { mapSortedModelsByProvider } from "@/lib/model-ordering"
+import { modelIconProvider } from "@/lib/model-vendor-logo"
 import {
   isProviderUnconfigured,
   resolveProviderSetupHint,
@@ -46,6 +55,8 @@ import {
   supportsModelFastMode,
 } from "@/lib/model-capabilities"
 import { ThinkingEffortSlider } from "@/components/chat/thinking-effort-slider"
+import { ReasoningLevelIcon } from "@/components/chat/reasoning-level-icon"
+import { reasoningColorClass } from "@/lib/reasoning-appearance"
 import { resolveProviderModelSwitchSelection } from "@/lib/provider-model-selection"
 import { useMultiAgentStore } from "@/lib/multi-agent-store"
 import { buildSystemInstruction } from "@/lib/mode-instructions"
@@ -56,6 +67,7 @@ import {
   usePromptInputController,
 } from "@/components/ai-elements/prompt-input"
 import { ComposerSubmit } from "@/components/chat/composer-submit"
+import { ComposerContextMeter } from "@/components/chat/composer-context-meter"
 import {
   SimpleDropdown,
   SimpleDropdownSub,
@@ -75,15 +87,10 @@ import {
   PauseIcon,
   PlayIcon,
   SquareIcon,
+  TerminalIcon,
 } from "lucide-react"
 import { HugeiconsIcon } from "@hugeicons/react"
 import {
-  AiBrainIcon,
-  // The model row used to show a generic cube, which reads as "package"; a
-  // chip names the engine. The speed row is a lightning bolt by the user's
-  // choice: the Fast option inside fills its bolt when active, so the outline
-  // on the row still reads as the axis rather than the value.
-  AiChipIcon,
   FlashIcon as FlashHugeIcon,
   BotIcon,
   ClipboardIcon,
@@ -106,7 +113,6 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
     currentModelName,
     selectedProvider,
     currentProvider,
-    selectedProviderId,
     selectedModel,
     setSelectedModel,
     setSelectedProviderId,
@@ -125,7 +131,11 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
     handleVoiceContextMenu,
   } = props
   const promptInput = usePromptInputController()
-  const planFollowUpActive = hasPendingPlan && !/^\/goal(?:\s|$)/i.test(promptInput.textInput.value.trim())
+  // Shift/Ctrl/⌘-click in a new chat: one prompt to several models.
+  const compare = useComposerCompare(props)
+  const planFollowUpActive =
+    hasPendingPlan &&
+    !/^\/goal(?:\s|$)/i.test(promptInput.textInput.value.trim())
   const planFollowUpLabel =
     planFollowUpActive && promptInput.textInput.value.trim().length > 0
       ? "Refine"
@@ -174,6 +184,12 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
     <ThinkingEffortSlider
       options={buildThinkingOptions()}
       thinkingMode={thinkingMode}
+      modelName={currentModelName}
+      selectionKey={JSON.stringify([
+        threadId,
+        currentProvider?.id,
+        selectedModel,
+      ])}
       onSelect={(mode) => setThinkingMode(mode, currentProvider?.id)}
     />
   )
@@ -225,23 +241,34 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
           ) : (
             (sortedModelsByProviderId.get(provider.id) ?? provider.models).map(
               (model) => {
-                const isSelected =
-                  selectedProviderId === provider.id &&
-                  selectedModel === model.id
+                // While comparing, every chosen model is checked.
+                const isSelected = compare.isRowSelected(provider.id, model.id)
                 return (
                   <SimpleDropdownSubItem
                     key={model.id}
-                    onClick={() => {
+                    onClick={(event) => {
+                      if (compare.handleModelClick(event, provider, model.id))
+                        return
                       selectProviderModel(provider, model.id)
                     }}
                     active={isSelected}
                   >
                     <ProviderIcon
-                      provider={provider}
+                      provider={modelIconProvider(provider, model)}
                       className="!size-3.5 shrink-0"
                     />
-                    <span className="flex-1 truncate text-left">
-                      {model.name}
+                    <span
+                      className="min-w-0 flex-1 text-left"
+                      title={model.name !== model.id ? model.id : undefined}
+                    >
+                      <span className="block truncate">{model.name}</span>
+                      {/* A readable name over an OpenRouter slug keeps the
+                          exact id in reach, so a typo still shows. */}
+                      {model.name !== model.id && model.id.includes("/") ? (
+                        <span className="block truncate font-mono text-[10px] text-muted-foreground/70">
+                          {model.id}
+                        </span>
+                      ) : null}
                     </span>
                     {isSelected && (
                       <CheckIcon className="size-3 shrink-0 text-primary" />
@@ -289,6 +316,15 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
       </SimpleDropdownSubItem>
     ))
 
+  // In a catalog of several makers (OpenRouter, Cursor) the chip and the
+  // Model row show the selected model's maker, like its row in the list.
+  const currentModelIconProvider =
+    currentProvider && selectedModel
+      ? modelIconProvider(currentProvider, {
+          id: selectedModel,
+          name: currentModelName,
+        })
+      : null
   const thinkingLabel =
     getThinkingModeLabel(currentProvider, selectedModel, thinkingMode) ?? "Off"
 
@@ -345,7 +381,7 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
           its size and the left group hides labels (see the @max-[400px]
           variants) instead of drawing under the model chip. */}
       <PromptInputTools className="min-w-0 gap-1 overflow-hidden">
-        {/* ── "+" menu — Files and folders + Orchestration ── */}
+        {/* ── "+" menu — Files and folders ── */}
         <div className="order-1">
           <SimpleDropdown
             align="start"
@@ -378,15 +414,6 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
                 </span>
               )}
             </SimpleDropdownSubItem>
-
-            <SimpleDropdownSeparator />
-            <ComposerOrchestrationMenu {...props} />
-
-            {/* Permissions used to be a submenu here. It now sits beside the
-                Mode chip in the input row — how an agent is allowed to act is
-                decided as often as which mode it runs in, and it was two
-                clicks deep with no indication of the current setting. */}
-
           </SimpleDropdown>
         </div>
 
@@ -429,7 +456,8 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
             It carries the icon of the ACTIVE preset, not a generic shield:
             the chip and the checked row in its own menu must show the same
             thing. Bypass Permission announces itself in red. ── */}
-        <div className="order-2">
+        <div className="order-2 flex shrink-0 items-center gap-1">
+          <ComposerOrchestrationMenu {...props} />
           <SimpleDropdown
             align="start"
             trigger={
@@ -441,10 +469,7 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
                   permissionLevel === "bypass" && "text-destructive"
                 )}
               >
-                <PermissionChipIcon
-                  className="size-3.5"
-                  strokeWidth={1.75}
-                />
+                <PermissionChipIcon className="size-3.5" strokeWidth={1.75} />
                 <span className="text-[12.5px] @max-[400px]:hidden">
                   {permissionLabel}
                 </span>
@@ -568,23 +593,58 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
               className="gap-1 rounded-md px-1.5 text-[12.5px] text-muted-foreground"
             >
               {/* The bolt is a Fast-Mode STATUS light, not a decoration —
-                  it only mounts while Fast Mode is actually on (#60). */}
-              {showFastMode && fastMode && (
-                <ZapIcon className="size-4" strokeWidth={2} />
+                  it only mounts while Fast Mode is actually on (#60), filled
+                  in the purple of the top reasoning levels. */}
+              {showFastMode && fastMode && !compare.active && (
+                <>
+                  {/* The Speed row's own bolt, so chip and menu match. */}
+                  <HugeiconsIcon
+                    icon={FlashHugeIcon}
+                    aria-hidden="true"
+                    strokeWidth={1.75}
+                    fill="currentColor"
+                    className="size-4 shrink-0 text-purple-700 dark:text-purple-400"
+                  />
+                  <span className="sr-only">Fast mode on</span>
+                </>
               )}
-              {currentProvider && (
+              {/* Comparing: the chosen models' logos stacked and their count
+                  in place of one model and its level. */}
+              {compare.active && (
+                <CompareChipModels
+                  compare={compare}
+                  className="max-w-[160px] @max-[400px]:max-w-[120px]"
+                />
+              )}
+              {!compare.active && currentProvider && (
                 <ProviderIcon
-                  provider={currentProvider}
+                  provider={currentModelIconProvider ?? currentProvider}
                   className="!size-3.5 shrink-0"
                 />
               )}
-              <span className="max-w-[120px] truncate text-[12.5px] text-foreground/90 @max-[400px]:max-w-[96px]">
-                {currentModelName}
-              </span>
-              {!isLmStudio && (
-                <span className="text-[12.5px] text-muted-foreground/70 @max-[400px]:hidden">
-                  {thinkingLabel}
+              {!compare.active && (
+                <span className="max-w-[120px] truncate text-[12.5px] text-foreground/90 @max-[400px]:max-w-[96px]">
+                  {currentModelName}
                 </span>
+              )}
+              {!isLmStudio && !compare.active && (
+                <>
+                  {/* The same stepped level icon as the Reasoning row; it
+                      stays when a narrow column hides the label. */}
+                  <ReasoningLevelIcon
+                    options={buildThinkingOptions()}
+                    mode={thinkingMode}
+                    className="size-3.5"
+                  />
+                  <span
+                    className={cn(
+                      "text-[12.5px] @max-[400px]:hidden",
+                      reasoningColorClass(thinkingMode)
+                    )}
+                  >
+                    {thinkingLabel}
+                  </span>
+                </>
               )}
               <ChevronDownIcon className="size-3.5 text-muted-foreground/60" />
             </PromptInputButton>
@@ -597,39 +657,52 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
             triggerClassName="min-h-8 gap-2.5 rounded-lg px-2.5 text-[12px]"
             trigger={
               <>
-                <HugeiconsIcon
-                  icon={AiChipIcon}
-                  strokeWidth={1.75}
-                  className="size-4 shrink-0 text-muted-foreground"
-                />
+                {currentProvider ? (
+                  <ProviderIcon
+                    provider={currentModelIconProvider ?? currentProvider}
+                    className="!size-4 shrink-0"
+                  />
+                ) : (
+                  <TerminalIcon aria-hidden="true" className="size-5" />
+                )}
                 <span className="flex-1">Model</span>
                 <span className="mr-1 max-w-[120px] truncate text-[11px] text-muted-foreground">
-                  {currentModelName}
+                  {compare.active
+                    ? `${compare.models.length} models`
+                    : currentModelName}
                 </span>
               </>
             }
             className="max-h-[300px] min-w-[210px]"
           >
             {renderModelItems()}
+            <ComposerCompareHint compare={compare} />
           </SimpleDropdownSub>
 
-          {!isLmStudio && (
+          {/* While comparing, each model gets its own reasoning row. */}
+          <ComposerCompareMenuRows compare={compare} />
+          {!isLmStudio && !compare.active && (
             <SimpleDropdownSub
               triggerClassName="min-h-8 gap-2.5 rounded-lg px-2.5 text-[12px]"
               trigger={
                 <>
-                  <HugeiconsIcon
-                    icon={AiBrainIcon}
-                    strokeWidth={1.75}
+                  <ReasoningLevelIcon
+                    options={buildThinkingOptions()}
+                    mode={thinkingMode}
                     className="size-4 shrink-0 text-muted-foreground"
                   />
                   <span className="flex-1">Reasoning</span>
-                  <span className="mr-1 text-[11px] text-muted-foreground">
+                  <span
+                    className={cn(
+                      "mr-1 text-[11px] font-medium",
+                      reasoningColorClass(thinkingMode)
+                    )}
+                  >
                     {thinkingLabel}
                   </span>
                 </>
               }
-              className="min-w-[256px]"
+              className="min-w-[258px]"
             >
               {renderThinkingItems()}
             </SimpleDropdownSub>
@@ -694,6 +767,15 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
           )}
         </SimpleDropdown>
 
+        <div className="contents @max-[300px]:hidden">
+          <ComposerContextMeter
+            threadId={threadId}
+            currentProvider={currentProvider}
+            selectedModel={selectedModel}
+            providers={providers}
+          />
+        </div>
+
         {!hideSubmit && (
           <>
             <VoiceInputControl
@@ -706,6 +788,7 @@ export function ComposerMinimalFooter(props: ComposerFooterProps) {
             <ComposerSubmit
               status={isStreaming ? "streaming" : undefined}
               onStop={handleStop}
+              provider={selectedProvider}
               size={planFollowUpActive && !isStreaming ? "sm" : "icon-xs"}
               className={cn(
                 "rounded-full",

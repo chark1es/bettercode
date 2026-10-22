@@ -12,8 +12,12 @@ import { logToErrorStore } from "@/lib/error-log-store"
 import { createLogger } from "@/lib/logger"
 import { RemoteAccessGate } from "@/components/remote/remote-access-gate"
 import { prefetchStreamdownCodePlugin } from "@/components/ai-elements/streamdown-plugins"
+import { initDesktopRuntimeConfig } from "@/services/backend/desktop-runtime-config"
 
 const log = createLogger("window")
+
+// Desktop: backend port and preview settings come from the shell over IPC.
+void initDesktopRuntimeConfig()
 
 // [SECURITY/OBSERVABILITY] Capture otherwise-silent async failures so they surface in the
 // error log store (and eventually in the copy-diagnostics button) instead of disappearing.
@@ -23,7 +27,12 @@ const log = createLogger("window")
 window.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason
   const err = reason instanceof Error ? reason : new Error(String(reason))
-  log.error("[unhandledrejection]", err.message, "\n", err.stack ?? "(no stack)")
+  log.error(
+    "[unhandledrejection]",
+    err.message,
+    "\n",
+    err.stack ?? "(no stack)"
+  )
   logToErrorStore({
     level: "unhandledrejection",
     message: err.message || "Unhandled promise rejection",
@@ -33,9 +42,16 @@ window.addEventListener("unhandledrejection", (event) => {
 })
 
 window.addEventListener("error", (event) => {
-  const err = event.error instanceof Error ? event.error : new Error(event.message)
+  const err =
+    event.error instanceof Error ? event.error : new Error(event.message)
   const source = `${event.filename ?? "?"}:${event.lineno ?? 0}:${event.colno ?? 0}`
-  log.error("[uncaught error]", err.message, `(${source})`, "\n", err.stack ?? "(no stack)")
+  log.error(
+    "[uncaught error]",
+    err.message,
+    `(${source})`,
+    "\n",
+    err.stack ?? "(no stack)"
+  )
   logToErrorStore({
     level: "error",
     message: err.message || "Uncaught error",

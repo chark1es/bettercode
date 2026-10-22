@@ -10,7 +10,7 @@ import type { ThreadActivityProjection } from "../../persistence/projections"
 import { ProviderRuntimeJournalReplayer } from "./ProviderRuntimeJournalReplayer"
 import { ProviderRuntimeJournalRecoveryStore } from "./ProviderRuntimeJournalRecoveryStore"
 import { ProviderRuntimeProjectionReceiptStore } from "./ProviderRuntimeProjectionReceiptStore"
-import type { ProviderRuntimeEvent } from "../types"
+import type { LegacyProviderEvent } from "../types"
 import {
   InMemoryPendingSourceProposedPlanImplementationStore,
   ProviderRuntimeBridgeError,
@@ -52,8 +52,8 @@ function makeBroadcaster(clientCount = 2) {
 }
 
 function toolCallEvent(
-  input?: Partial<ProviderRuntimeEvent>
-): ProviderRuntimeEvent {
+  input?: Partial<LegacyProviderEvent>
+): LegacyProviderEvent {
   return {
     event_type: "tool_call",
     thread_id: "thread-1",
@@ -86,14 +86,16 @@ interface JournaledRow {
  * goldens (today's `canonicalToLegacy -> ingest` path) and the parity tests
  * that drive the same fixtures through the post-journal bridge.
  */
-function makeCanonicalHarness(options: {
-  readonly sequenceStart?: number
-  readonly appendSequenceStart?: number
-  readonly legacyView?: (
-    event: CanonicalProviderRuntimeEvent
-  ) => ProviderRuntimeEvent | null
-  readonly append?: (rows: JournaledRow[]) => Array<{ sequence: number }>
-} = {}) {
+function makeCanonicalHarness(
+  options: {
+    readonly sequenceStart?: number
+    readonly appendSequenceStart?: number
+    readonly legacyView?: (
+      event: CanonicalProviderRuntimeEvent
+    ) => LegacyProviderEvent | null
+    readonly append?: (rows: JournaledRow[]) => Array<{ sequence: number }>
+  } = {}
+) {
   const rows: JournaledRow[] = []
   let appendSequence = options.appendSequenceStart ?? 500
   const append = vi.fn(
@@ -109,7 +111,7 @@ function makeCanonicalHarness(options: {
   } as unknown as EventStore)
   const activities: ThreadActivityProjection[] = []
   const frames: unknown[] = []
-  const projected: ProviderRuntimeEvent[] = []
+  const projected: LegacyProviderEvent[] = []
   const receipts = { markProjected: vi.fn() }
   const lifecycleStore = {
     hasProviderTurn: vi.fn(() => true),
@@ -134,7 +136,7 @@ function makeCanonicalHarness(options: {
     onFatalProjectionFailure: fatal,
     sequenceStart: options.sequenceStart ?? 100,
     ...(options.legacyView ? { legacyView: options.legacyView } : {}),
-    projectedSink: (event: ProviderRuntimeEvent) =>
+    projectedSink: (event: LegacyProviderEvent) =>
       projected.push(structuredClone(event)),
   })
   return {
@@ -190,10 +192,10 @@ function withFrozenClock<T>(run: () => T): T {
   }
 }
 
-function runtimeFrames(frames: ReadonlyArray<unknown>): ProviderRuntimeEvent[] {
+function runtimeFrames(frames: ReadonlyArray<unknown>): LegacyProviderEvent[] {
   return frames
     .filter(
-      (frame): frame is { channel: string; data: ProviderRuntimeEvent } =>
+      (frame): frame is { channel: string; data: LegacyProviderEvent } =>
         (frame as { channel?: unknown }).channel === "provider.runtimeEvent"
     )
     .map((frame) => frame.data)
@@ -320,16 +322,22 @@ describe("ProviderRuntimeIngestion", () => {
       broadcaster: makeBroadcaster(),
       logger: makeLogger(),
     })
-    const failures: Array<ProviderRuntimeEvent> = [
+    const failures: Array<LegacyProviderEvent> = [
       {
         event_type: "turn_error",
         thread_id: "thread-terminal",
-        payload: { dispatchTurnId: "dispatch-error", message: "provider error" },
+        payload: {
+          dispatchTurnId: "dispatch-error",
+          message: "provider error",
+        },
       },
       {
         event_type: "turn_interrupted",
         thread_id: "thread-terminal",
-        payload: { dispatchTurnId: "dispatch-interrupted", reason: "user interrupt" },
+        payload: {
+          dispatchTurnId: "dispatch-interrupted",
+          reason: "user interrupt",
+        },
       },
       {
         event_type: "turn.aborted",
@@ -341,11 +349,9 @@ describe("ProviderRuntimeIngestion", () => {
     for (const event of failures) ingestion.ingest(event)
 
     expect(lifecycleStore.markFailedByProviderTurn).toHaveBeenCalledTimes(3)
-    expect(lifecycleStore.markFailedByProviderTurn.mock.calls.map((call) => call[2])).toEqual([
-      "dispatch-error",
-      "dispatch-interrupted",
-      "dispatch-aborted",
-    ])
+    expect(
+      lifecycleStore.markFailedByProviderTurn.mock.calls.map((call) => call[2])
+    ).toEqual(["dispatch-error", "dispatch-interrupted", "dispatch-aborted"])
     expect(lifecycleStore.markCompletedByProviderTurn).not.toHaveBeenCalled()
   })
 
@@ -368,14 +374,18 @@ describe("ProviderRuntimeIngestion", () => {
       broadcaster: makeBroadcaster(),
       logger: makeLogger(),
     })
-    const event: ProviderRuntimeEvent = {
+    const event: LegacyProviderEvent = {
       event_type: "turn_completed",
       thread_id: "thread-terminal",
       payload: { dispatchTurnId: "dispatch-replayed" },
     }
 
-    ingestion.replayPersisted(legacyJournalEntry(event), { projectionSequence: 91 })
-    ingestion.replayPersisted(legacyJournalEntry(event), { projectionSequence: 91 })
+    ingestion.replayPersisted(legacyJournalEntry(event), {
+      projectionSequence: 91,
+    })
+    ingestion.replayPersisted(legacyJournalEntry(event), {
+      projectionSequence: 91,
+    })
 
     expect(status).toBe("completed")
     expect(markCompletedByProviderTurn).toHaveBeenCalledTimes(2)
@@ -438,7 +448,10 @@ describe("ProviderRuntimeIngestion", () => {
 
     ingestion.ingest(event)
 
-    expect(eventJournal.persist).toHaveBeenCalledWith(legacyJournalEntry(event), 41)
+    expect(eventJournal.persist).toHaveBeenCalledWith(
+      legacyJournalEntry(event),
+      41
+    )
     expect(eventJournal.persist.mock.invocationCallOrder[0]).toBeLessThan(
       broadcaster.broadcast.mock.invocationCallOrder[0] ?? 0
     )
@@ -480,9 +493,7 @@ describe("ProviderRuntimeIngestion", () => {
 
   it("leaves a journal event unreceipted when a projection fails", () => {
     const projectionReceipts = { markProjected: vi.fn() }
-    const persist = vi.fn()
-      .mockReturnValueOnce(74)
-      .mockReturnValueOnce(75)
+    const persist = vi.fn().mockReturnValueOnce(74).mockReturnValueOnce(75)
     const fatal = vi.fn()
     const upsert = vi.fn(() => {
       throw new Error("activity store unavailable")
@@ -507,15 +518,14 @@ describe("ProviderRuntimeIngestion", () => {
     expect(persist).toHaveBeenCalledTimes(2)
     expect(
       upsert.mock.calls.filter(
-        (call) => (call as unknown as [{ kind: string }])[0].kind === "tool.started"
+        (call) =>
+          (call as unknown as [{ kind: string }])[0].kind === "tool.started"
       )
     ).toHaveLength(2)
   })
 
   it("holds back the broadcast of an event whose receipt failed and surfaces a degraded notice", () => {
-    const persist = vi.fn()
-      .mockReturnValueOnce(81)
-      .mockReturnValueOnce(82)
+    const persist = vi.fn().mockReturnValueOnce(81).mockReturnValueOnce(82)
     const upsert = vi.fn()
     const fatal = vi.fn()
     const broadcaster = makeBroadcaster()
@@ -545,14 +555,16 @@ describe("ProviderRuntimeIngestion", () => {
     expect(fatal).toHaveBeenCalledTimes(2)
     expect(persist).toHaveBeenCalledTimes(2)
     const runtimeFrames = broadcaster.frames.filter(
-      (frame): frame is { channel: string; data: ProviderRuntimeEvent } =>
+      (frame): frame is { channel: string; data: LegacyProviderEvent } =>
         typeof frame === "object" &&
         frame !== null &&
         (frame as { channel?: unknown }).channel === "provider.runtimeEvent"
     )
     // The events themselves are never broadcast without a receipt...
     expect(
-      runtimeFrames.filter((frame) => frame.data.event_type !== "runtime.warning")
+      runtimeFrames.filter(
+        (frame) => frame.data.event_type !== "runtime.warning"
+      )
     ).toEqual([])
     // ...but the user is told, in-thread, that projection is degraded — once
     // per thread per degraded block, not once per event.
@@ -598,9 +610,10 @@ describe("ProviderRuntimeIngestion", () => {
     })
     const notices = () =>
       broadcaster.frames.filter(
-        (frame): frame is { channel: string; data: ProviderRuntimeEvent } =>
-          (frame as { channel?: unknown }).channel === "provider.runtimeEvent" &&
-          (frame as { data: ProviderRuntimeEvent }).data.event_type ===
+        (frame): frame is { channel: string; data: LegacyProviderEvent } =>
+          (frame as { channel?: unknown }).channel ===
+            "provider.runtimeEvent" &&
+          (frame as { data: LegacyProviderEvent }).data.event_type ===
             "runtime.warning"
       )
 
@@ -638,7 +651,9 @@ describe("ProviderRuntimeIngestion", () => {
     })
     const event = toolCallEvent()
 
-    ingestion.replayPersisted(legacyJournalEntry(event), { projectionSequence: 91 })
+    ingestion.replayPersisted(legacyJournalEntry(event), {
+      projectionSequence: 91,
+    })
 
     expect(activityStore.upsert).toHaveBeenCalledOnce()
     expect(eventJournal.persist).not.toHaveBeenCalled()
@@ -662,7 +677,9 @@ describe("ProviderRuntimeIngestion", () => {
       sequenceStart: 1_000_000,
     })
 
-    ingestion.replayPersisted(legacyJournalEntry(toolCallEvent()), { projectionSequence: 91 })
+    ingestion.replayPersisted(legacyJournalEntry(toolCallEvent()), {
+      projectionSequence: 91,
+    })
 
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({ sequence: 91 })
@@ -890,7 +907,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(
       broadcaster.frames
         .filter(
-          (frame): frame is { channel: string; data: ProviderRuntimeEvent } =>
+          (frame): frame is { channel: string; data: LegacyProviderEvent } =>
             typeof frame === "object" &&
             frame !== null &&
             (frame as { channel?: unknown }).channel === "provider.runtimeEvent"
@@ -959,7 +976,7 @@ describe("ProviderRuntimeIngestion", () => {
       broadcaster,
       logger: makeLogger(),
     })
-    const contentEvent: ProviderRuntimeEvent = {
+    const contentEvent: LegacyProviderEvent = {
       event_type: "content_delta",
       thread_id: "thread-ephemeral",
       payload: {
@@ -967,7 +984,7 @@ describe("ProviderRuntimeIngestion", () => {
         delta: "private transient response",
       },
     }
-    const terminalEvent: ProviderRuntimeEvent = {
+    const terminalEvent: LegacyProviderEvent = {
       event_type: "turn_completed",
       thread_id: "thread-ephemeral",
       payload: { turn_id: "turn-ephemeral", status: "completed" },
@@ -1097,7 +1114,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(
       broadcaster.frames
         .filter(
-          (frame): frame is { channel: string; data: ProviderRuntimeEvent } =>
+          (frame): frame is { channel: string; data: LegacyProviderEvent } =>
             (frame as { channel?: unknown }).channel === "provider.runtimeEvent"
         )
         .map((frame) => frame.data.event_type)
@@ -1138,7 +1155,10 @@ describe("ProviderRuntimeIngestion", () => {
       },
     })
     ingestion.ingest(
-      toolCallEvent({ thread_id: "thread-oversized", payload: { tool_id: "tool-2" } })
+      toolCallEvent({
+        thread_id: "thread-oversized",
+        payload: { tool_id: "tool-2" },
+      })
     )
 
     expect(fatal).not.toHaveBeenCalled()
@@ -1165,29 +1185,53 @@ describe("ProviderRuntimeIngestion", () => {
       output: string
       payloadTruncated?: boolean
       journal_truncation?: { fields: string[] }
+      outputTruncated?: boolean
+      outputBytes?: number
     }
-    expect(livePayload.output.length).toBeLessThan(2 * 1024 * 1024)
-    expect(livePayload.output).toMatch(/^x+$/)
+    // The journal bounds the event to its row limit; the activity then keeps
+    // only the head and tail of that copy within the activity budget.
+    expect(
+      Buffer.byteLength(JSON.stringify(livePayload), "utf8")
+    ).toBeLessThanOrEqual(64 * 1024)
+    expect(livePayload.output).toMatch(/^x+\n… \[output truncated: .+\] …\nx+$/)
+    expect(livePayload.outputTruncated).toBe(true)
+    expect(livePayload.outputBytes).toBe(
+      JSON.parse(bigRow!.payload_json).payload.output.length
+    )
     expect(livePayload.payloadTruncated).toBe(true)
     expect(livePayload.journal_truncation?.fields).toEqual(["output"])
     const broadcastBig = broadcaster.frames.find(
-      (frame): frame is { channel: string; data: ProviderRuntimeEvent } =>
+      (frame): frame is { channel: string; data: LegacyProviderEvent } =>
         (frame as { channel?: unknown }).channel === "provider.runtimeEvent" &&
-        (frame as { data: ProviderRuntimeEvent }).data.event_type === "tool_result"
+        (frame as { data: LegacyProviderEvent }).data.event_type ===
+          "tool_result"
     )
+    // The wire copy is bounded like the activity: head and tail of the
+    // journaled output with the marker, the original size recorded.
+    const broadcastPayload = broadcastBig?.data.payload as {
+      output: string
+      outputTruncated?: boolean
+      outputBytes?: number
+      payloadTruncated?: boolean
+    }
     expect(
-      (broadcastBig?.data.payload as { output: string }).output.length
-    ).toBeLessThan(2 * 1024 * 1024)
+      Buffer.byteLength(JSON.stringify(broadcastPayload), "utf8")
+    ).toBeLessThanOrEqual(64 * 1024)
+    expect(broadcastPayload.output).toMatch(
+      /^x+\n… \[output truncated: .+\] …\nx+$/
+    )
+    expect(broadcastPayload.outputTruncated).toBe(true)
+    expect(broadcastPayload.outputBytes).toBe(
+      JSON.parse(bigRow!.payload_json).payload.output.length
+    )
+    expect(broadcastPayload.payloadTruncated).toBe(true)
     expect(
-      JSON.parse(bigRow!.payload_json).payload.output
-    ).toBe((broadcastBig?.data.payload as { output: string }).output)
-    expect(projectionReceipts.markProjected.mock.calls.map((call) => call[0])).toEqual([
-      501, 502,
-    ])
+      projectionReceipts.markProjected.mock.calls.map((call) => call[0])
+    ).toEqual([501, 502])
     expect(
       broadcaster.frames
         .filter(
-          (frame): frame is { channel: string; data: ProviderRuntimeEvent } =>
+          (frame): frame is { channel: string; data: LegacyProviderEvent } =>
             (frame as { channel?: unknown }).channel === "provider.runtimeEvent"
         )
         .map((frame) => frame.data.event_type)
@@ -1293,12 +1337,12 @@ describe("ProviderRuntimeIngestion", () => {
         journalRetryBaseMs: 10,
         journalRetryMaxMs: 10,
       })
-      const terminal: ProviderRuntimeEvent = {
+      const terminal: LegacyProviderEvent = {
         event_type: "turn_completed",
         thread_id: "thread-journal-retry",
         payload: { turn_id: "turn-1" },
       }
-      const later: ProviderRuntimeEvent = {
+      const later: LegacyProviderEvent = {
         event_type: "session.updated",
         thread_id: "thread-journal-retry",
         payload: { status: "ready" },
@@ -1312,7 +1356,7 @@ describe("ProviderRuntimeIngestion", () => {
 
       const runtimeEvents = broadcaster.frames
         .filter(
-          (frame): frame is { channel: string; data: ProviderRuntimeEvent } =>
+          (frame): frame is { channel: string; data: LegacyProviderEvent } =>
             typeof frame === "object" &&
             frame !== null &&
             (frame as { channel?: unknown }).channel === "provider.runtimeEvent"
@@ -1327,7 +1371,7 @@ describe("ProviderRuntimeIngestion", () => {
 
   it("spools a journal retry queue before graceful shutdown", () => {
     const enqueue = vi.fn(() => true)
-    const event: ProviderRuntimeEvent = {
+    const event: LegacyProviderEvent = {
       event_type: "turn_completed",
       thread_id: "thread-shutdown-journal",
       payload: { turn_id: "turn-1" },
@@ -1358,17 +1402,17 @@ describe("ProviderRuntimeIngestion", () => {
     const enqueue = vi.fn(() => true)
     const fatal = vi.fn()
     const logger = makeLogger()
-    const first: ProviderRuntimeEvent = {
+    const first: LegacyProviderEvent = {
       event_type: "content_delta",
       thread_id: "thread-overflow",
       payload: { turn_id: "turn-1", delta: "first" },
     }
-    const overflow: ProviderRuntimeEvent = {
+    const overflow: LegacyProviderEvent = {
       event_type: "content_delta",
       thread_id: "thread-overflow",
       payload: { turn_id: "turn-1", delta: "second" },
     }
-    const rejectedAfterStop: ProviderRuntimeEvent = {
+    const rejectedAfterStop: LegacyProviderEvent = {
       event_type: "turn_completed",
       thread_id: "thread-overflow",
       payload: { turn_id: "turn-1" },
@@ -1408,7 +1452,7 @@ describe("ProviderRuntimeIngestion", () => {
   it("spools the current event instead of dropping it when the retry queue byte limit is exceeded", () => {
     const enqueue = vi.fn(() => true)
     const fatal = vi.fn()
-    const event: ProviderRuntimeEvent = {
+    const event: LegacyProviderEvent = {
       event_type: "content_delta",
       thread_id: "thread-byte-overflow",
       payload: { turn_id: "turn-1", delta: "larger than one byte" },
@@ -1569,71 +1613,114 @@ describe("ProviderRuntimeIngestion", () => {
     ["item.completed", { itemType: "assistantMessage" }],
     ["item_completed", { role: "assistant" }],
     ["item.completed", { kind: "agentMessage" }],
-    ["tool_call", { tool_id: "read-1", tool_name: "Read", input: { path: "README.md" } }],
-  ])("preserves paragraphs across %s without changing token chunks", (eventType, payload) => {
-    const upsertMessage = vi.fn()
-    const ingestion = new ProviderRuntimeIngestion({
-      eventBus: new EventEmitter(), activityStore: { upsert: vi.fn() },
-      transcriptStore: { upsertMessage }, broadcaster: makeBroadcaster(), logger: makeLogger(),
-    })
-    const emit = (event_type: string, data: Record<string, unknown>) => ingestion.ingest({
-      event_type, thread_id: "paragraphs", payload: { turn_id: "turn-1", ...data },
-    })
-    emit("content_delta", { delta: "I will re" })
-    emit("content_delta", { delta: "view the files." })
-    emit(eventType, payload)
-    emit("content_delta", { delta: "" })
-    emit("content_delta", { delta: "## Findings\n\nCode uses `foo" })
-    emit("content_delta", { delta: "bar()`." })
-    emit("turn_completed", {})
-    expect(upsertMessage).toHaveBeenLastCalledWith(expect.objectContaining({
-      message: expect.objectContaining({ content: "I will review the files.\n\n## Findings\n\nCode uses `foobar()`." }),
-    }))
-    ingestion.stop()
-  })
+    [
+      "tool_call",
+      { tool_id: "read-1", tool_name: "Read", input: { path: "README.md" } },
+    ],
+  ])(
+    "preserves paragraphs across %s without changing token chunks",
+    (eventType, payload) => {
+      const upsertMessage = vi.fn()
+      const ingestion = new ProviderRuntimeIngestion({
+        eventBus: new EventEmitter(),
+        activityStore: { upsert: vi.fn() },
+        transcriptStore: { upsertMessage },
+        broadcaster: makeBroadcaster(),
+        logger: makeLogger(),
+      })
+      const emit = (event_type: string, data: Record<string, unknown>) =>
+        ingestion.ingest({
+          event_type,
+          thread_id: "paragraphs",
+          payload: { turn_id: "turn-1", ...data },
+        })
+      emit("content_delta", { delta: "I will re" })
+      emit("content_delta", { delta: "view the files." })
+      emit(eventType, payload)
+      emit("content_delta", { delta: "" })
+      emit("content_delta", { delta: "## Findings\n\nCode uses `foo" })
+      emit("content_delta", { delta: "bar()`." })
+      emit("turn_completed", {})
+      expect(upsertMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          message: expect.objectContaining({
+            content:
+              "I will review the files.\n\n## Findings\n\nCode uses `foobar()`.",
+          }),
+        })
+      )
+      ingestion.stop()
+    }
+  )
 
-  it.each(["\n\n", "\r\n\r\n"])("does not duplicate existing %j paragraph spacing", (newline) => {
-    const upsertMessage = vi.fn()
-    const ingestion = new ProviderRuntimeIngestion({
-      eventBus: new EventEmitter(), activityStore: { upsert: vi.fn() },
-      transcriptStore: { upsertMessage }, broadcaster: makeBroadcaster(), logger: makeLogger(),
-    })
-    const emit = (event_type: string, payload: Record<string, unknown>) => ingestion.ingest({
-      event_type, thread_id: "paragraphs", payload: { turn_id: "turn-1", ...payload },
-    })
-    emit("content_delta", { delta: `First${newline}` })
-    emit("item.completed", { itemType: "assistantMessage" })
-    emit("content_delta", { delta: "Second" })
-    emit("turn_completed", {})
-    expect(upsertMessage).toHaveBeenLastCalledWith(expect.objectContaining({
-      message: expect.objectContaining({ content: `First${newline}Second` }),
-    }))
-    ingestion.stop()
-  })
+  it.each(["\n\n", "\r\n\r\n"])(
+    "does not duplicate existing %j paragraph spacing",
+    (newline) => {
+      const upsertMessage = vi.fn()
+      const ingestion = new ProviderRuntimeIngestion({
+        eventBus: new EventEmitter(),
+        activityStore: { upsert: vi.fn() },
+        transcriptStore: { upsertMessage },
+        broadcaster: makeBroadcaster(),
+        logger: makeLogger(),
+      })
+      const emit = (event_type: string, payload: Record<string, unknown>) =>
+        ingestion.ingest({
+          event_type,
+          thread_id: "paragraphs",
+          payload: { turn_id: "turn-1", ...payload },
+        })
+      emit("content_delta", { delta: `First${newline}` })
+      emit("item.completed", { itemType: "assistantMessage" })
+      emit("content_delta", { delta: "Second" })
+      emit("turn_completed", {})
+      expect(upsertMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          message: expect.objectContaining({
+            content: `First${newline}Second`,
+          }),
+        })
+      )
+      ingestion.stop()
+    }
+  )
 
   it("restores an assistant boundary and ignores replayed events before adding the suffix", () => {
     const upsertMessage = vi.fn()
     const ingestion = new ProviderRuntimeIngestion({
-      eventBus: new EventEmitter(), activityStore: { upsert: vi.fn() },
+      eventBus: new EventEmitter(),
+      activityStore: { upsert: vi.fn() },
       transcriptStore: {
         upsertMessage,
         getMessage: () => ({
-          message_id: "provider-assistant:paragraphs:turn-1", turn_id: "turn-1", role: "assistant", content: "First.",
+          message_id: "provider-assistant:paragraphs:turn-1",
+          turn_id: "turn-1",
+          role: "assistant",
+          content: "First.",
           created_at: "2026-09-14T12:00:00Z",
-          extra: { providerRuntimeSequence: 10, assistantTextBoundaryPending: true },
+          extra: {
+            providerRuntimeSequence: 10,
+            assistantTextBoundaryPending: true,
+          },
         }),
       },
-      broadcaster: makeBroadcaster(), logger: makeLogger(),
+      broadcaster: makeBroadcaster(),
+      logger: makeLogger(),
     })
-    const delta = (text: string) => legacyJournalEntry({
-      event_type: "content_delta", thread_id: "paragraphs", payload: { turn_id: "turn-1", delta: text },
-    })
+    const delta = (text: string) =>
+      legacyJournalEntry({
+        event_type: "content_delta",
+        thread_id: "paragraphs",
+        payload: { turn_id: "turn-1", delta: text },
+      })
     ingestion.replayPersisted(delta("First."), { projectionSequence: 9 })
     ingestion.replayPersisted(delta("Second."), { projectionSequence: 11 })
     ingestion.replayPersisted(delta("Second."), { projectionSequence: 11 })
-    expect(upsertMessage).toHaveBeenLastCalledWith(expect.objectContaining({
-      message: expect.objectContaining({ content: "First.\n\nSecond." }),
-    }))
+    expect(upsertMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({ content: "First.\n\nSecond." }),
+      })
+    )
     const extra = upsertMessage.mock.lastCall?.[0].message.extra
     expect(extra.assistantTextBoundaryPending).toBeUndefined()
     ingestion.stop()
@@ -1890,8 +1977,17 @@ describe("ProviderRuntimeIngestion", () => {
         title: "readFile",
         data: {
           kind: "search",
-          rawInput: { variant: "Grep", pattern: "readFile", path: "C:\\repo\\src" },
-          content: [{ type: "content", content: { type: "text", text: "found 0 matches" } }],
+          rawInput: {
+            variant: "Grep",
+            pattern: "readFile",
+            path: "C:\\repo\\src",
+          },
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: "found 0 matches" },
+            },
+          ],
         },
         createdAt: "2026-09-16T20:00:01.000Z",
       },
@@ -2068,17 +2164,20 @@ describe("ProviderRuntimeIngestion", () => {
 
       vi.advanceTimersByTime(10)
 
-      expect(enqueue).toHaveBeenCalledWith({
-        thread_id: "thread-spool",
-        message: expect.objectContaining({
-          message_id: providerAssistantMessageId(
-            "thread-spool",
-            "turn-spool"
-          ),
-          role: "assistant",
-          content: "recover me",
-        }),
-      }, { reason: "retry_exhausted", truncated: false })
+      expect(enqueue).toHaveBeenCalledWith(
+        {
+          thread_id: "thread-spool",
+          message: expect.objectContaining({
+            message_id: providerAssistantMessageId(
+              "thread-spool",
+              "turn-spool"
+            ),
+            role: "assistant",
+            content: "recover me",
+          }),
+        },
+        { reason: "retry_exhausted", truncated: false }
+      )
       const state = ingestion as unknown as {
         bufferedAssistantTranscripts: Map<string, unknown>
       }
@@ -2110,10 +2209,13 @@ describe("ProviderRuntimeIngestion", () => {
     })
     ingestion.stop()
 
-    expect(enqueue).toHaveBeenCalledWith({
-      thread_id: "thread-shutdown-spool",
-      message: expect.objectContaining({ content: "shutdown recovery" }),
-    }, { reason: "shutdown", truncated: false })
+    expect(enqueue).toHaveBeenCalledWith(
+      {
+        thread_id: "thread-shutdown-spool",
+        message: expect.objectContaining({ content: "shutdown recovery" }),
+      },
+      { reason: "shutdown", truncated: false }
+    )
   })
 
   it("reports fatal durability failure when shutdown cannot persist or spool", () => {
@@ -2245,10 +2347,10 @@ describe("ProviderRuntimeIngestion", () => {
 
       vi.advanceTimersByTime(10)
 
-      expect(onFatalDurabilityFailure).toHaveBeenCalledWith(
-        expect.any(Error),
-        { threadId: "thread-fatal", turnId: "turn-fatal" }
-      )
+      expect(onFatalDurabilityFailure).toHaveBeenCalledWith(expect.any(Error), {
+        threadId: "thread-fatal",
+        turnId: "turn-fatal",
+      })
     } finally {
       vi.useRealTimers()
     }
@@ -2364,7 +2466,7 @@ describe("ProviderRuntimeIngestion", () => {
       logger,
       sequenceStart: 20,
     })
-    const event: ProviderRuntimeEvent = {
+    const event: LegacyProviderEvent = {
       event_type: "tool.denied",
       thread_id: "thread-1",
       payload: {
@@ -2587,9 +2689,8 @@ describe("ProviderRuntimeIngestion", () => {
     )
 
     expect(
-      projected.find(
-        (activity) => activity.kind === "turn.proposed.completed"
-      )?.payload
+      projected.find((activity) => activity.kind === "turn.proposed.completed")
+        ?.payload
     ).toMatchObject({ planMarkdown: "# Plan\n- recovered step" })
   })
 
@@ -2863,7 +2964,7 @@ describe("ProviderRuntimeIngestion", () => {
     const broadcaster = makeBroadcaster()
     const logger = makeLogger()
     const updateThreadTitle = vi.fn()
-    const event: ProviderRuntimeEvent = {
+    const event: LegacyProviderEvent = {
       event_type: "thread.metadata.updated",
       thread_id: "thread-1",
       payload: {
@@ -3462,7 +3563,7 @@ describe("ProviderRuntimeIngestion", () => {
     const broadcaster = makeBroadcaster()
     const logger = makeLogger()
     const checkpointDiffStore = { recordRuntimeEvent: vi.fn() }
-    const event: ProviderRuntimeEvent = {
+    const event: LegacyProviderEvent = {
       event_type: "turn.diff.updated",
       thread_id: "thread-1",
       payload: {
@@ -3493,7 +3594,7 @@ describe("ProviderRuntimeIngestion", () => {
   it("still broadcasts provider events when checkpoint diff persistence fails", () => {
     const broadcaster = makeBroadcaster()
     const logger = makeLogger()
-    const event: ProviderRuntimeEvent = {
+    const event: LegacyProviderEvent = {
       event_type: "turn.diff.updated",
       thread_id: "thread-1",
       payload: {
@@ -3564,7 +3665,7 @@ describe("ProviderRuntimeIngestion", () => {
     })
     ingestion.start()
 
-    const failingEvent: ProviderRuntimeEvent = {
+    const failingEvent: LegacyProviderEvent = {
       event_type: "turn.started",
       thread_id: "thread-1",
       payload: {
@@ -3573,7 +3674,7 @@ describe("ProviderRuntimeIngestion", () => {
         turn_id: "turn-fails-in-sidecar",
       },
     }
-    const followUpEvent: ProviderRuntimeEvent = {
+    const followUpEvent: LegacyProviderEvent = {
       event_type: "runtime.error",
       thread_id: "thread-1",
       payload: {
@@ -3651,24 +3752,168 @@ describe("canonical fixtures through the legacy bridge path (goldens)", () => {
   const GOLDEN_ACTIVITY_ROWS: ReadonlyArray<
     [string, string, string | null, string, number, string, string]
   > = [
-    ["turn.started", "thread-fixture::turn.started::turn-1", "turn-1", "thinking", 101, "2026-09-11T12:00:00.000Z", "Turn started"],
-    ["tool.started", "thread-fixture::tool.started::tool-1", "turn-1", "tool", 103, "1970-01-01T00:00:01.002Z", "Ran command: npm test"],
-    ["tool.updated", "thread-fixture::tool.updated::tool-1", "turn-1", "tool", 104, "2026-09-11T12:00:00.000Z", "Ran command output"],
-    ["tool.completed", "thread-fixture::tool.completed::tool-1", "turn-1", "tool", 105, "1970-01-01T00:00:01.004Z", "Ran command completed"],
-    ["tool.failed", "thread-fixture::tool.failed::tool-2", "turn-1", "error", 106, "1970-01-01T00:00:01.005Z", "Read file failed"],
-    ["tool.started", "thread-fixture::tool.started::item-2", "turn-1", "tool", 107, "1970-01-01T00:00:01.006Z", "Changed files: a.ts"],
-    ["tool.completed", "thread-fixture::tool.completed::item-2", "turn-1", "tool", 108, "1970-01-01T00:00:01.007Z", "Changed files completed"],
-    ["plan-approval.requested", "thread-fixture::plan-approval.requested::req-plan-1", "turn-1", "approval", 109, "2026-09-11T12:00:00.000Z", "Plan approval requested"],
-    ["approval.requested", "thread-fixture::approval.requested::req-tool-1", "turn-1", "approval", 110, "2026-09-11T12:00:00.000Z", "Approval required for exec_command"],
-    ["approval.resolved", "thread-fixture::approval.resolved::req-tool-1", "turn-1", "info", 111, "2026-09-11T12:00:00.000Z", "Approval approved"],
-    ["tool.denied", "thread-fixture::tool.denied::evt-tool-denied", "turn-1", "error", 112, "2026-09-11T12:00:00.000Z", "Tool denied: rm"],
-    ["turn.diff.updated", "thread-fixture::turn.diff.updated::turn-1", "turn-1", "info", 114, "2026-09-11T12:00:00.000Z", "Diff updated"],
-    ["runtime.error", "thread-fixture::runtime.error::evt-runtime-error", "turn-1", "error", 115, "2026-09-11T12:00:00.000Z", "Provider runtime error"],
-    ["runtime.error", "thread-fixture::runtime.error::116", "turn-1", "error", 116, "2026-09-11T12:00:00.000Z", "Provider runtime error"],
-    ["turn.completed", "thread-fixture::turn_completed::turn-2", "turn-2", "info", 117, "2026-09-11T12:00:00.000Z", "Turn completed"],
-    ["turn.aborted", "thread-fixture::turn.aborted::turn-3", "turn-3", "info", 118, "2026-09-11T12:00:00.000Z", "Turn interrupted"],
-    ["session.exited", "thread-fixture::session.exited::119", null, "error", 119, "2026-09-11T12:00:00.000Z", "Provider session exited with error"],
-    ["session.state.changed", "thread-fixture::session.state.changed::120", null, "info", 120, "2026-09-11T12:00:00.000Z", "Provider session ready"],
+    [
+      "turn.started",
+      "thread-fixture::turn.started::turn-1",
+      "turn-1",
+      "thinking",
+      101,
+      "2026-09-11T12:00:00.000Z",
+      "Turn started",
+    ],
+    [
+      "tool.started",
+      "thread-fixture::tool.started::tool-1",
+      "turn-1",
+      "tool",
+      103,
+      "1970-01-01T00:00:01.002Z",
+      "Ran command: npm test",
+    ],
+    [
+      "tool.updated",
+      "thread-fixture::tool.updated::tool-1",
+      "turn-1",
+      "tool",
+      104,
+      "2026-09-11T12:00:00.000Z",
+      "Ran command output",
+    ],
+    [
+      "tool.completed",
+      "thread-fixture::tool.completed::tool-1",
+      "turn-1",
+      "tool",
+      105,
+      "1970-01-01T00:00:01.004Z",
+      "Ran command completed",
+    ],
+    [
+      "tool.failed",
+      "thread-fixture::tool.failed::tool-2",
+      "turn-1",
+      "error",
+      106,
+      "1970-01-01T00:00:01.005Z",
+      "Read file failed",
+    ],
+    [
+      "tool.started",
+      "thread-fixture::tool.started::item-2",
+      "turn-1",
+      "tool",
+      107,
+      "1970-01-01T00:00:01.006Z",
+      "Changed files: a.ts",
+    ],
+    [
+      "tool.completed",
+      "thread-fixture::tool.completed::item-2",
+      "turn-1",
+      "tool",
+      108,
+      "1970-01-01T00:00:01.007Z",
+      "Changed files completed",
+    ],
+    [
+      "plan-approval.requested",
+      "thread-fixture::plan-approval.requested::req-plan-1",
+      "turn-1",
+      "approval",
+      109,
+      "2026-09-11T12:00:00.000Z",
+      "Plan approval requested",
+    ],
+    [
+      "approval.requested",
+      "thread-fixture::approval.requested::req-tool-1",
+      "turn-1",
+      "approval",
+      110,
+      "2026-09-11T12:00:00.000Z",
+      "Approval required for exec_command",
+    ],
+    [
+      "approval.resolved",
+      "thread-fixture::approval.resolved::req-tool-1",
+      "turn-1",
+      "info",
+      111,
+      "2026-09-11T12:00:00.000Z",
+      "Approval approved",
+    ],
+    [
+      "tool.denied",
+      "thread-fixture::tool.denied::evt-tool-denied",
+      "turn-1",
+      "error",
+      112,
+      "2026-09-11T12:00:00.000Z",
+      "Tool denied: rm",
+    ],
+    [
+      "turn.diff.updated",
+      "thread-fixture::turn.diff.updated::turn-1",
+      "turn-1",
+      "info",
+      114,
+      "2026-09-11T12:00:00.000Z",
+      "Diff updated",
+    ],
+    [
+      "runtime.error",
+      "thread-fixture::runtime.error::evt-runtime-error",
+      "turn-1",
+      "error",
+      115,
+      "2026-09-11T12:00:00.000Z",
+      "Provider runtime error",
+    ],
+    [
+      "runtime.error",
+      "thread-fixture::runtime.error::116",
+      "turn-1",
+      "error",
+      116,
+      "2026-09-11T12:00:00.000Z",
+      "Provider runtime error",
+    ],
+    [
+      "turn.completed",
+      "thread-fixture::turn_completed::turn-2",
+      "turn-2",
+      "info",
+      117,
+      "2026-09-11T12:00:00.000Z",
+      "Turn completed",
+    ],
+    [
+      "turn.aborted",
+      "thread-fixture::turn.aborted::turn-3",
+      "turn-3",
+      "info",
+      118,
+      "2026-09-11T12:00:00.000Z",
+      "Turn interrupted",
+    ],
+    [
+      "session.exited",
+      "thread-fixture::session.exited::119",
+      null,
+      "error",
+      119,
+      "2026-09-11T12:00:00.000Z",
+      "Provider session exited with error",
+    ],
+    [
+      "session.state.changed",
+      "thread-fixture::session.state.changed::120",
+      null,
+      "info",
+      120,
+      "2026-09-11T12:00:00.000Z",
+      "Provider session ready",
+    ],
   ]
 
   const GOLDEN_FRAMES: ReadonlyArray<[string, string]> = [
@@ -3765,8 +4010,12 @@ describe("canonical fixtures through the legacy bridge path (goldens)", () => {
       ])
     ).toEqual(GOLDEN_ACTIVITY_ROWS)
     expect(snapshot.frames.map(frameSummary)).toEqual(GOLDEN_FRAMES)
-    expect(snapshot.rows.map((row) => row.event_type)).toEqual(GOLDEN_ROW_ENVELOPES)
-    expect(snapshot.rows.every((row) => row.stream_id === "thread-fixture")).toBe(true)
+    expect(snapshot.rows.map((row) => row.event_type)).toEqual(
+      GOLDEN_ROW_ENVELOPES
+    )
+    expect(
+      snapshot.rows.every((row) => row.stream_id === "thread-fixture")
+    ).toBe(true)
     // Every journaled row is receipted, in order, and the two bridge-declined
     // fixtures never reach the journal on this path.
     expect(snapshot.receipts).toEqual(
@@ -3778,7 +4027,12 @@ describe("canonical fixtures through the legacy bridge path (goldens)", () => {
         ["thread-fixture", "codex-work", "turn-1", "provider exploded"],
         ["thread-fixture", "codex-work", "dispatch-1", "model refused"],
         ["thread-fixture", "codex-work", "dispatch-3", "user interrupt"],
-        ["thread-fixture", "codex-work", "dispatch-4", "process exited with code 1"],
+        [
+          "thread-fixture",
+          "codex-work",
+          "dispatch-4",
+          "process exited with code 1",
+        ],
       ],
     })
     expect(harness.fatal).not.toHaveBeenCalled()
@@ -3844,7 +4098,9 @@ describe("canonical fixtures through the legacy bridge path (goldens)", () => {
       exitKind: "error",
       recoverable: false,
     })
-    expect(byKind("session.exited")).toMatchObject({ dispatchTurnId: "dispatch-4" })
+    expect(byKind("session.exited")).toMatchObject({
+      dispatchTurnId: "dispatch-4",
+    })
   })
 
   it("pins the bounded live projection of an oversized tool result", () => {
@@ -3855,17 +4111,36 @@ describe("canonical fixtures through the legacy bridge path (goldens)", () => {
 
     expect(harness.rows).toHaveLength(1)
     const row = harness.rows[0]!
-    expect(Buffer.byteLength(row.payload_json, "utf8")).toBeLessThanOrEqual(1024 * 1024)
-    expect(JSON.parse(row.metadata_json)).toMatchObject({ payloadTruncated: true })
+    expect(Buffer.byteLength(row.payload_json, "utf8")).toBeLessThanOrEqual(
+      1024 * 1024
+    )
+    expect(JSON.parse(row.metadata_json)).toMatchObject({
+      payloadTruncated: true,
+    })
     const activity = harness.activities[0]!
     const payload = activity.payload as {
       output: string
       payloadTruncated?: boolean
-      journal_truncation?: { truncated: boolean; fields: string[]; originalBytes: number }
+      outputTruncated?: boolean
+      outputBytes?: number
+      journal_truncation?: {
+        truncated: boolean
+        fields: string[]
+        originalBytes: number
+      }
     }
+    // The journal cuts the output clean; the activity then keeps only the
+    // head and tail of that copy within the activity budget.
+    const journaledOutput = JSON.parse(row.payload_json).payload
+      .output as string
+    expect(journaledOutput).toMatch(/^x+$/)
     expect(activity.kind).toBe("tool.completed")
-    expect(payload.output).toMatch(/^x+$/)
-    expect(payload.output.length).toBeLessThan(2 * 1024 * 1024)
+    expect(
+      Buffer.byteLength(JSON.stringify(payload), "utf8")
+    ).toBeLessThanOrEqual(64 * 1024)
+    expect(payload.output).toMatch(/^x+\n… \[output truncated: .+\] …\nx+$/)
+    expect(payload.outputTruncated).toBe(true)
+    expect(payload.outputBytes).toBe(journaledOutput.length)
     expect(payload.payloadTruncated).toBe(true)
     expect(payload.journal_truncation).toMatchObject({
       truncated: true,
@@ -3873,8 +4148,21 @@ describe("canonical fixtures through the legacy bridge path (goldens)", () => {
     })
     const [frame] = runtimeFrames(harness.frames)
     expect(frame!.event_type).toBe("tool_result")
-    expect((frame!.payload as { output: string }).output).toBe(payload.output)
-    expect(JSON.parse(row.payload_json).payload.output).toBe(payload.output)
+    // The wire copy is bounded like the activity, from the same journaled
+    // copy.
+    const framePayload = frame!.payload as {
+      output: string
+      outputTruncated?: boolean
+      outputBytes?: number
+    }
+    expect(
+      Buffer.byteLength(JSON.stringify(framePayload), "utf8")
+    ).toBeLessThanOrEqual(64 * 1024)
+    expect(framePayload.output).toMatch(
+      /^x+\n… \[output truncated: .+\] …\nx+$/
+    )
+    expect(framePayload.outputTruncated).toBe(true)
+    expect(framePayload.outputBytes).toBe(journaledOutput.length)
     expect(harness.receipts.markProjected).toHaveBeenCalledWith(501)
   })
 })
@@ -3888,7 +4176,9 @@ describe("canonical fixtures through the legacy bridge path (goldens)", () => {
  */
 describe("canonical ingestion behind the journal", () => {
   /** The old path: bridge in front, then legacy ingest (the golden reference). */
-  function goldenSnapshot(events: ReadonlyArray<CanonicalProviderRuntimeEvent>) {
+  function goldenSnapshot(
+    events: ReadonlyArray<CanonicalProviderRuntimeEvent>
+  ) {
     const harness = makeCanonicalHarness()
     withFrozenClock(() => driveThroughLegacyBridgePath(harness, events))
     return { harness, snapshot: harnessSnapshot(harness) }
@@ -3915,7 +4205,9 @@ describe("canonical ingestion behind the journal", () => {
     const renumber = <T extends { sequence?: number | null }>(record: T): T => {
       const sequence = record.sequence
       if (typeof sequence !== "number") return record
-      const skew = declinedSequences.filter((declined) => declined < sequence).length
+      const skew = declinedSequences.filter(
+        (declined) => declined < sequence
+      ).length
       if (skew === 0) return record
       const renumbered = sequence - skew
       const renumberId = (id: unknown) =>
@@ -3934,8 +4226,13 @@ describe("canonical ingestion behind the journal", () => {
       ...snapshot,
       activities: snapshot.activities.map(renumber),
       frames: snapshot.frames.map((frame) => {
-        const { channel, data } = frame as { channel: string; data: { sequence?: number | null } }
-        return channel === "thread.activity" ? { ...(frame as object), data: renumber(data) } : frame
+        const { channel, data } = frame as {
+          channel: string
+          data: { sequence?: number | null }
+        }
+        return channel === "thread.activity"
+          ? { ...(frame as object), data: renumber(data) }
+          : frame
       }),
     }
   }
@@ -3954,14 +4251,18 @@ describe("canonical ingestion behind the journal", () => {
     return { harness, snapshot: harnessSnapshot(harness) }
   }
 
-  function sqliteHarness(options: {
-    readonly legacyView?: (
-      event: CanonicalProviderRuntimeEvent
-    ) => ProviderRuntimeEvent | null
-    readonly receipts?: boolean
-    readonly sequenceStart?: number
-  } = {}) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bc0de-canonical-journal-"))
+  function sqliteHarness(
+    options: {
+      readonly legacyView?: (
+        event: CanonicalProviderRuntimeEvent
+      ) => LegacyProviderEvent | null
+      readonly receipts?: boolean
+      readonly sequenceStart?: number
+    } = {}
+  ) {
+    const dir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "bc0de-canonical-journal-")
+    )
     const db = openDatabase(path.join(dir, "test.sqlite"))
     runMigrations(db)
     const events = new EventStore(db)
@@ -3990,7 +4291,12 @@ describe("canonical ingestion behind the journal", () => {
       })
     const ingestion = build(options.legacyView)
     const replayAllWithRealBridge = () =>
-      new ProviderRuntimeJournalReplayer(events, receipts, build(), logger).replayAll()
+      new ProviderRuntimeJournalReplayer(
+        events,
+        receipts,
+        build(),
+        logger
+      ).replayAll()
     return {
       db,
       events,
@@ -4020,11 +4326,17 @@ describe("canonical ingestion behind the journal", () => {
       stream_id: "thread-fixture",
       stream_version: 102,
     })
-    expect(golden.snapshot.activities.map((activity) => activity.sequence)).toEqual([
-      101, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 117, 118, 119, 120,
+    expect(
+      golden.snapshot.activities.map((activity) => activity.sequence)
+    ).toEqual([
+      101, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 117,
+      118, 119, 120,
     ])
-    expect(live.snapshot.activities.map((activity) => activity.sequence)).toEqual([
-      101, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 115, 116, 117, 118, 119, 120, 121,
+    expect(
+      live.snapshot.activities.map((activity) => activity.sequence)
+    ).toEqual([
+      101, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 115, 116, 117, 118,
+      119, 120, 121,
     ])
     expect(
       live.snapshot.activities
@@ -4037,7 +4349,10 @@ describe("canonical ingestion behind the journal", () => {
     ])
 
     // Everything else is byte for byte what the old path produced.
-    const normalized = withoutDeclinedSequenceSkew(live.snapshot, CANONICAL_JOURNAL_FIXTURES)
+    const normalized = withoutDeclinedSequenceSkew(
+      live.snapshot,
+      CANONICAL_JOURNAL_FIXTURES
+    )
     expect(normalized.activities).toEqual(golden.snapshot.activities)
     expect(normalized.frames).toEqual(golden.snapshot.frames)
     expect(live.snapshot.lifecycle).toEqual(golden.snapshot.lifecycle)
@@ -4057,7 +4372,9 @@ describe("canonical ingestion behind the journal", () => {
       expect(JSON.parse(row.metadata_json)).toMatchObject({ schema: 3 })
       expect(row.payload_json).not.toContain('"raw"')
     }
-    expect(live.snapshot.receipts).toEqual(events.map((_, index) => 501 + index))
+    expect(live.snapshot.receipts).toEqual(
+      events.map((_, index) => 501 + index)
+    )
     expect(golden.snapshot.receipts).toHaveLength(events.length - 2)
     expect(live.harness.fatal).not.toHaveBeenCalled()
     // The only error-level lines are the "event failed" lines both paths
@@ -4067,7 +4384,10 @@ describe("canonical ingestion behind the journal", () => {
       golden.harness.logger.error.mock.calls
     )
     expect(
-      live.harness.logger.error.mock.calls.map((call) => [call[0].event, call[1]])
+      live.harness.logger.error.mock.calls.map((call) => [
+        call[0].event,
+        call[1],
+      ])
     ).toEqual([
       ["turn_error", "event failed"],
       ["turn_error", "event failed"],
@@ -4083,15 +4403,26 @@ describe("canonical ingestion behind the journal", () => {
       sequence += 1
       const legacy = canonicalToLegacy(cloneFixtureEvent(fixture.event))!
       v2.journal.persist(legacyJournalEntry(legacy), sequence)
-      v3.journal.persist(canonicalJournalEntry(cloneFixtureEvent(fixture.event)), sequence)
+      v3.journal.persist(
+        canonicalJournalEntry(cloneFixtureEvent(fixture.event)),
+        sequence
+      )
     }
-    expect(v2.events.readUnprojectedProviderRuntimeEvents(100)).toHaveLength(sequence)
-    expect(v3.events.readUnprojectedProviderRuntimeEvents(100)).toHaveLength(sequence)
+    expect(v2.events.readUnprojectedProviderRuntimeEvents(100)).toHaveLength(
+      sequence
+    )
+    expect(v3.events.readUnprojectedProviderRuntimeEvents(100)).toHaveLength(
+      sequence
+    )
 
     const v2Result = withFrozenClock(() => v2.replayAllWithRealBridge())
     const v3Result = withFrozenClock(() => v3.replayAllWithRealBridge())
 
-    expect(v2Result).toEqual({ replayed: sequence, discarded: 0, blocked: null })
+    expect(v2Result).toEqual({
+      replayed: sequence,
+      discarded: 0,
+      blocked: null,
+    })
     expect(v3Result).toEqual(v2Result)
     expect(v3.activities).toEqual(v2.activities)
     expect(JSON.stringify(v3.activities)).toBe(JSON.stringify(v2.activities))
@@ -4113,18 +4444,35 @@ describe("canonical ingestion behind the journal", () => {
     const livePayload = liveActivity.payload as {
       output: string
       payloadTruncated?: boolean
-      journal_truncation?: { truncated: boolean; fields: string[]; originalBytes: number }
+      outputTruncated?: boolean
+      outputBytes?: number
+      journal_truncation?: {
+        truncated: boolean
+        fields: string[]
+        originalBytes: number
+      }
     }
     expect(liveActivity.kind).toBe("tool.completed")
-    expect(livePayload.output).toMatch(/^x+$/)
-    expect(livePayload.output.length).toBeLessThan(2 * 1024 * 1024)
+    expect(
+      Buffer.byteLength(JSON.stringify(livePayload), "utf8")
+    ).toBeLessThanOrEqual(64 * 1024)
+    expect(livePayload.output).toMatch(/^x+\n… \[output truncated: .+\] …\nx+$/)
+    expect(livePayload.outputTruncated).toBe(true)
     expect(livePayload.payloadTruncated).toBe(true)
     expect(livePayload.journal_truncation).toMatchObject({
       truncated: true,
       fields: ["output"],
     })
     const [liveFrame] = runtimeFrames(live.frames)
-    expect((liveFrame!.payload as { output: string }).output).toBe(livePayload.output)
+    const liveFramePayload = liveFrame!.payload as {
+      output: string
+      outputTruncated?: boolean
+      outputBytes?: number
+    }
+    expect(liveFramePayload.output).toMatch(
+      /^x+\n… \[output truncated: .+\] …\nx+$/
+    )
+    expect(liveFramePayload.outputTruncated).toBe(true)
     // The row is canonical and pure: the markers live in metadata.
     const [row] = live.events.readUnprojectedProviderRuntimeEvents(10)
     expect(JSON.parse(row!.metadata_json)).toMatchObject({
@@ -4135,14 +4483,20 @@ describe("canonical ingestion behind the journal", () => {
     const stored = JSON.parse(row!.payload_json) as Record<string, unknown>
     expect(stored).not.toHaveProperty("payloadTruncated")
     expect(stored).not.toHaveProperty("journal_truncation")
-    expect(stored.output).toBe(livePayload.output)
+    // The journal cuts the output clean; the activity and the frame keep the
+    // head and tail of that copy and record its size.
+    expect(stored.output).toMatch(/^x+$/)
+    expect(livePayload.outputBytes).toBe((stored.output as string).length)
+    expect(liveFramePayload.outputBytes).toBe((stored.output as string).length)
 
     // Same DB, fresh ingestion: replay projects the identical activity.
     const activitiesBeforeReplay = live.activities.length
     withFrozenClock(() => live.replayAllWithRealBridge())
     expect(live.activities).toHaveLength(activitiesBeforeReplay + 1)
     expect(live.activities[1]).toEqual(liveActivity)
-    expect(JSON.stringify(live.activities[1])).toBe(JSON.stringify(liveActivity))
+    expect(JSON.stringify(live.activities[1])).toBe(
+      JSON.stringify(liveActivity)
+    )
     live.close()
   })
 
@@ -4158,12 +4512,17 @@ describe("canonical ingestion behind the journal", () => {
     harness.ingestion.ingestCanonical(cloneFixtureEvent(fixture.event))
 
     expect(append).toHaveBeenCalledTimes(1)
-    const [row] = harness.events.readProviderRuntimeByStreamVersion("thread-fixture", 101)
+    const [row] = harness.events.readProviderRuntimeByStreamVersion(
+      "thread-fixture",
+      101
+    )
     const { raw: _raw, ...withoutRaw } = fixture.event as { raw?: unknown }
     expect(JSON.parse(row!.payload_json)).toEqual(withoutRaw)
     expect(harness.activities).toEqual([])
     expect(harness.frames).toEqual([])
-    expect(harness.receipts.get(row!.sequence)).toMatchObject({ status: "projected" })
+    expect(harness.receipts.get(row!.sequence)).toMatchObject({
+      status: "projected",
+    })
     expect(harness.fatal).not.toHaveBeenCalled()
     expect(harness.logger.info).toHaveBeenCalledWith(
       { event_type: "tool.completed", thread: "thread-fixture" },
@@ -4173,10 +4532,14 @@ describe("canonical ingestion behind the journal", () => {
     // The maintenance step a bridge fix would ship with: clear the receipt so
     // the startup replayer re-offers the row to the (now correct) bridge.
     harness.db
-      .prepare("DELETE FROM provider_runtime_projection_receipts WHERE event_sequence = ?")
+      .prepare(
+        "DELETE FROM provider_runtime_projection_receipts WHERE event_sequence = ?"
+      )
       .run(row!.sequence)
     withFrozenClock(() => harness.replayAllWithRealBridge())
-    expect(harness.activities.map((activity) => activity.kind)).toEqual(["tool.completed"])
+    expect(harness.activities.map((activity) => activity.kind)).toEqual([
+      "tool.completed",
+    ])
     expect(harness.activities[0]!.payload).toMatchObject({
       toolId: "tool-1",
       output: { stdout: "ok", exitCode: 0 },
@@ -4201,7 +4564,10 @@ describe("canonical ingestion behind the journal", () => {
     ).not.toThrow()
 
     expect(append).toHaveBeenCalledTimes(1)
-    const [row] = harness.events.readProviderRuntimeByStreamVersion("thread-fixture", 101)
+    const [row] = harness.events.readProviderRuntimeByStreamVersion(
+      "thread-fixture",
+      101
+    )
     expect(JSON.parse(row!.payload_json)).toMatchObject({
       type: "tool.completed",
       toolId: "tool-1",
@@ -4209,14 +4575,18 @@ describe("canonical ingestion behind the journal", () => {
     })
     expect(harness.receipts.get(row!.sequence)).toBeNull()
     // Nothing of the tool result reached the user; the degraded notice did.
-    expect(harness.activities.map((activity) => activity.kind)).toEqual(["runtime.warning"])
+    expect(harness.activities.map((activity) => activity.kind)).toEqual([
+      "runtime.warning",
+    ])
     expect(harness.activities[0]!.payload).toMatchObject({
       class: "projection_degraded",
       providerKind: "codex",
       providerInstanceId: "codex-work",
     })
     const notices = runtimeFrames(harness.frames)
-    expect(notices.map((frame) => frame.event_type)).toEqual(["runtime.warning"])
+    expect(notices.map((frame) => frame.event_type)).toEqual([
+      "runtime.warning",
+    ])
     expect(notices[0]!.payload).toMatchObject({
       class: "projection_degraded",
       reason: "projection",
@@ -4235,11 +4605,13 @@ describe("canonical ingestion behind the journal", () => {
     )
     expect(harness.logger.error).toHaveBeenCalledTimes(1)
 
-    withFrozenClock(() => expect(harness.replayAllWithRealBridge()).toEqual({
-      replayed: 1,
-      discarded: 0,
-      blocked: null,
-    }))
+    withFrozenClock(() =>
+      expect(harness.replayAllWithRealBridge()).toEqual({
+        replayed: 1,
+        discarded: 0,
+        blocked: null,
+      })
+    )
     expect(harness.activities.map((activity) => activity.kind)).toEqual([
       "runtime.warning",
       "tool.completed",
@@ -4248,7 +4620,9 @@ describe("canonical ingestion behind the journal", () => {
       toolId: "tool-1",
       output: { stdout: "ok", exitCode: 0 },
     })
-    expect(harness.receipts.get(row!.sequence)).toMatchObject({ status: "projected" })
+    expect(harness.receipts.get(row!.sequence)).toMatchObject({
+      status: "projected",
+    })
     harness.close()
   })
 
@@ -4279,7 +4653,10 @@ describe("canonical ingestion behind the journal", () => {
     })
 
     // Durable, unreceipted, surfaced once — and no taint.
-    const [row] = harness.events.readProviderRuntimeByStreamVersion("thread-fixture", 101)
+    const [row] = harness.events.readProviderRuntimeByStreamVersion(
+      "thread-fixture",
+      101
+    )
     expect(JSON.parse(row!.payload_json)).toMatchObject({
       type: "turn.completed",
       turnId: "turn-2",
@@ -4287,17 +4664,21 @@ describe("canonical ingestion behind the journal", () => {
     })
     expect(harness.receipts.get(row!.sequence)).toBeNull()
     expect(harness.fatal).not.toHaveBeenCalled()
-    expect(harness.activities.map((activity) => activity.kind)).toEqual(["runtime.warning"])
-    expect(runtimeFrames(harness.frames).map((frame) => frame.event_type)).toEqual([
+    expect(harness.activities.map((activity) => activity.kind)).toEqual([
       "runtime.warning",
     ])
+    expect(
+      runtimeFrames(harness.frames).map((frame) => frame.event_type)
+    ).toEqual(["runtime.warning"])
     expect(harness.logger.error.mock.calls.map((call) => call[1])).toEqual([
       "legacy bridge failed after journaling; row left unreceipted for startup replay",
     ])
 
     // A non-terminal event on the same thread afterwards is not blocked, and
     // the degraded notice is not repeated while the block lasts.
-    const started = CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === "tool.started")!
+    const started = CANONICAL_JOURNAL_FIXTURES.find(
+      (entry) => entry.name === "tool.started"
+    )!
     expect(() =>
       harness.ingestion.ingestCanonical(cloneFixtureEvent(started.event))
     ).not.toThrow()
@@ -4319,7 +4700,9 @@ describe("canonical ingestion behind the journal", () => {
       "tool.started",
       "turn.completed",
     ])
-    expect(harness.receipts.get(row!.sequence)).toMatchObject({ status: "projected" })
+    expect(harness.receipts.get(row!.sequence)).toMatchObject({
+      status: "projected",
+    })
     harness.close()
   })
 
@@ -4332,7 +4715,9 @@ describe("canonical ingestion behind the journal", () => {
       const persist = vi
         .fn()
         .mockImplementationOnce(() => {
-          throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" })
+          throw Object.assign(new Error("database is locked"), {
+            code: "SQLITE_BUSY",
+          })
         })
         .mockImplementation(() => 91)
       const receipts = { markProjected: vi.fn() }
@@ -4372,7 +4757,9 @@ describe("canonical ingestion behind the journal", () => {
       ])
       // The queue is drained: a later event journals and projects normally.
       const later = cloneFixtureEvent(
-        CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === "tool.started")!.event
+        CANONICAL_JOURNAL_FIXTURES.find(
+          (entry) => entry.name === "tool.started"
+        )!.event
       )
       ingestion.ingestCanonical(later)
       expect(persist).toHaveBeenCalledTimes(3)
@@ -4405,18 +4792,24 @@ describe("canonical ingestion behind the journal", () => {
     expect(() =>
       ingestion.ingestCanonical(byName("session.state.changed"))
     ).not.toThrow()
-    expect(() => ingestion.ingestCanonical(byName("tool.completed with raw envelope"))).not.toThrow()
+    expect(() =>
+      ingestion.ingestCanonical(byName("tool.completed with raw envelope"))
+    ).not.toThrow()
     expect(() =>
       ingestion.ingestCanonical(byName("turn.completed status failed"))
     ).toThrow(failure)
     expect(() =>
       ingestion.ingestCanonical(byName("turn.completed status completed"))
     ).toThrow(failure)
-    expect(() => ingestion.ingestCanonical(byName("turn.aborted"))).toThrow(failure)
+    expect(() => ingestion.ingestCanonical(byName("turn.aborted"))).toThrow(
+      failure
+    )
     // `session.exited` settles a correlated admission in the hub exactly like
     // `turn.aborted`, so it is terminal here too — in both spellings.
     expect(() =>
-      ingestion.ingestCanonical(byName("session.exited with injected dispatchTurnId"))
+      ingestion.ingestCanonical(
+        byName("session.exited with injected dispatchTurnId")
+      )
     ).toThrow(failure)
     expect(() =>
       ingestion.ingest({
@@ -4437,16 +4830,22 @@ describe("canonical ingestion behind the journal", () => {
 
   it("journals, receipts and does not broadcast a structural event the bridge declines, and replays it silently", () => {
     const fixture = CANONICAL_JOURNAL_FIXTURES.find(
-      (entry) => entry.name === "request.opened tool_user_input (bridge declines)"
+      (entry) =>
+        entry.name === "request.opened tool_user_input (bridge declines)"
     )!
     const harness = sqliteHarness()
 
     harness.ingestion.ingestCanonical(cloneFixtureEvent(fixture.event))
 
-    const [row] = harness.events.readProviderRuntimeByStreamVersion("thread-fixture", 101)
+    const [row] = harness.events.readProviderRuntimeByStreamVersion(
+      "thread-fixture",
+      101
+    )
     expect(row).toMatchObject({ event_type: "ProviderRuntime:request.opened" })
     expect(JSON.parse(row!.payload_json)).toEqual(fixture.event)
-    expect(harness.receipts.get(row!.sequence)).toMatchObject({ status: "projected" })
+    expect(harness.receipts.get(row!.sequence)).toMatchObject({
+      status: "projected",
+    })
     expect(harness.activities).toEqual([])
     expect(harness.frames).toEqual([])
     expect(() =>
@@ -4489,7 +4888,7 @@ describe("canonical ingestion behind the journal", () => {
           (entry) => entry.name === "turn.completed status completed"
         )!.event
       )
-      const later: ProviderRuntimeEvent = {
+      const later: LegacyProviderEvent = {
         event_type: "session.updated",
         thread_id: "thread-fixture",
         payload: { status: "ready" },
@@ -4501,10 +4900,9 @@ describe("canonical ingestion behind the journal", () => {
       expect(broadcaster.broadcast).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(10)
 
-      expect(runtimeFrames(broadcaster.frames).map((event) => event.event_type)).toEqual([
-        "turn_completed",
-        "session.updated",
-      ])
+      expect(
+        runtimeFrames(broadcaster.frames).map((event) => event.event_type)
+      ).toEqual(["turn_completed", "session.updated"])
       expect(persist).toHaveBeenCalledWith(
         { shape: "canonical", event: canonicalTerminal },
         41
@@ -4516,7 +4914,9 @@ describe("canonical ingestion behind the journal", () => {
   })
 
   it("spools a queued canonical entry as a version 3 recovery record during shutdown", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bc0de-canonical-spool-"))
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "bc0de-canonical-spool-")
+    )
     const recoveryStore = new ProviderRuntimeJournalRecoveryStore(directory, {
       logger: makeLogger(),
     })
@@ -4534,14 +4934,19 @@ describe("canonical ingestion behind the journal", () => {
       sequenceStart: 40,
     })
     const event = cloneFixtureEvent(
-      CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === "tool.started")!.event
+      CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === "tool.started")!
+        .event
     )
 
     ingestion.ingestCanonical(event)
     expect(() => ingestion.stop()).not.toThrow()
 
-    const [fileName] = fs.readdirSync(directory).filter((name) => name.endsWith(".json"))
-    const record = JSON.parse(fs.readFileSync(path.join(directory, fileName!), "utf8"))
+    const [fileName] = fs
+      .readdirSync(directory)
+      .filter((name) => name.endsWith(".json"))
+    const record = JSON.parse(
+      fs.readFileSync(path.join(directory, fileName!), "utf8")
+    )
     expect(record).toMatchObject({
       version: 3,
       shape: "canonical",
@@ -4564,7 +4969,7 @@ describe("canonical ingestion behind the journal", () => {
 
   it("hands the legacy view to projectedSink exactly once per live event, after the receipt, never on replay", () => {
     const calls: string[] = []
-    const projected: ProviderRuntimeEvent[] = []
+    const projected: LegacyProviderEvent[] = []
     const ingestion = new ProviderRuntimeIngestion({
       eventBus: new EventEmitter(),
       eventJournal: { persist: vi.fn(() => (calls.push("journal"), 77)) },
@@ -4583,9 +4988,10 @@ describe("canonical ingestion behind the journal", () => {
       },
     })
     const started = cloneFixtureEvent(
-      CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === "tool.started")!.event
+      CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === "tool.started")!
+        .event
     )
-    const legacyStarted: ProviderRuntimeEvent = {
+    const legacyStarted: LegacyProviderEvent = {
       event_type: "turn_started",
       thread_id: "thread-fixture",
       payload: { turn_id: "turn-1", dispatchTurnId: "dispatch-1" },
@@ -4595,20 +5001,34 @@ describe("canonical ingestion behind the journal", () => {
     ingestion.ingest(legacyStarted)
 
     expect(calls).toEqual([
-      "journal", "activity", "receipt", "projected", "broadcast",
-      "journal", "activity", "receipt", "projected", "broadcast",
+      "journal",
+      "activity",
+      "receipt",
+      "projected",
+      "broadcast",
+      "journal",
+      "activity",
+      "receipt",
+      "projected",
+      "broadcast",
     ])
     expect(projected).toEqual([canonicalToLegacy(started), legacyStarted])
 
-    ingestion.replayPersisted(canonicalJournalEntry(started), { projectionSequence: 5 })
-    ingestion.replayPersisted(legacyJournalEntry(legacyStarted), { projectionSequence: 6 })
+    ingestion.replayPersisted(canonicalJournalEntry(started), {
+      projectionSequence: 5,
+    })
+    ingestion.replayPersisted(legacyJournalEntry(legacyStarted), {
+      projectionSequence: 6,
+    })
     expect(projected).toHaveLength(2)
   })
 
   it("does not hand a declined, bridge-failed or projection-blocked event to projectedSink", () => {
-    const projected: ProviderRuntimeEvent[] = []
+    const projected: LegacyProviderEvent[] = []
     const byName = (name: string) =>
-      cloneFixtureEvent(CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === name)!.event)
+      cloneFixtureEvent(
+        CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === name)!.event
+      )
     const declined = byName("item.started non-tool item (bridge declines)")
     const started = byName("tool.started")
     const completed = byName("tool.completed with raw envelope")
@@ -4667,29 +5087,53 @@ describe("canonical ingestion behind the journal", () => {
     expect(harness.fatal).not.toHaveBeenCalled()
     expect(harness.rows).toHaveLength(1)
     const row = harness.rows[0]!
-    expect(Buffer.byteLength(row.payload_json, "utf8")).toBeLessThanOrEqual(1024 * 1024)
+    expect(Buffer.byteLength(row.payload_json, "utf8")).toBeLessThanOrEqual(
+      1024 * 1024
+    )
     expect(JSON.parse(row.metadata_json)).toMatchObject({
       schema: 3,
       payloadTruncated: true,
       stringCapBytes: 32 * 1024,
     })
+    const stored = JSON.parse(row.payload_json) as {
+      output: { content: Array<{ text: string }> }
+    }
+    expect(stored.output.content).toHaveLength(25)
+    expect(Buffer.byteLength(stored.output.content[0]!.text, "utf8")).toBe(
+      32 * 1024
+    )
     expect(harness.receipts.markProjected).toHaveBeenCalledWith(501)
-    // Projected and broadcast from the bounded copy, with the markers.
-    expect(harness.activities.map((activity) => activity.kind)).toEqual(["tool.completed"])
+    // Projected and broadcast from the bounded copy, with the markers. The
+    // activity then keeps only the head and tail of each journaled block
+    // within the activity budget, and records the journaled output's size.
+    expect(harness.activities.map((activity) => activity.kind)).toEqual([
+      "tool.completed",
+    ])
     const payload = harness.activities[0]!.payload as {
       output: { content: Array<{ text: string }> }
       payloadTruncated?: boolean
+      outputTruncated?: boolean
+      outputBytes?: number
       journal_truncation?: { fields: string[] }
     }
+    expect(
+      Buffer.byteLength(JSON.stringify(payload), "utf8")
+    ).toBeLessThanOrEqual(64 * 1024)
     expect(payload.output.content).toHaveLength(25)
-    expect(Buffer.byteLength(payload.output.content[0]!.text, "utf8")).toBe(32 * 1024)
+    expect(payload.output.content[0]!.text).toMatch(
+      /^a+\n… \[output truncated: .+\] …\na+$/
+    )
+    expect(payload.outputTruncated).toBe(true)
+    expect(payload.outputBytes).toBe(
+      Buffer.byteLength(JSON.stringify(stored.output), "utf8")
+    )
     expect(payload.payloadTruncated).toBe(true)
     expect(payload.journal_truncation?.fields).toHaveLength(25)
     const [frame] = runtimeFrames(harness.frames)
     expect(frame!.event_type).toBe("tool_result")
-    expect(harness.projected.map((projectedEvent) => projectedEvent.event_type)).toEqual([
-      "tool_result",
-    ])
+    expect(
+      harness.projected.map((projectedEvent) => projectedEvent.event_type)
+    ).toEqual(["tool_result"])
   })
 
   it("subscribes to the canonical bus lane and leaves it on stop", () => {
@@ -4702,7 +5146,8 @@ describe("canonical ingestion behind the journal", () => {
       logger: makeLogger(),
     })
     const started = cloneFixtureEvent(
-      CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === "tool.started")!.event
+      CANONICAL_JOURNAL_FIXTURES.find((entry) => entry.name === "tool.started")!
+        .event
     )
 
     ingestion.start()

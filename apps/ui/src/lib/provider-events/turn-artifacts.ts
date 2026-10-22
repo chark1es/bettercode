@@ -3,14 +3,8 @@
  * proposed plans, streaming diff summaries and captured checkpoints.
  */
 
-import {
-  asRecord,
-  readString,
-} from "@betterc0de/schema"
-import {
-  useChatStore,
-  emptyStreamState,
-} from "@/lib/chat-store"
+import { asRecord, readString } from "@betterc0de/schema"
+import { useChatStore, emptyStreamState } from "@/lib/chat-store"
 import { useCheckpointStore } from "@/lib/checkpoint-store"
 import { extractProposedPlanMarkdown } from "@/lib/plan-content"
 import {
@@ -25,7 +19,9 @@ import {
   payloadNumber,
 } from "./payload"
 
-export function isAssistantMessageItem(payload: Record<string, unknown>): boolean {
+export function isAssistantMessageItem(
+  payload: Record<string, unknown>
+): boolean {
   const itemType = readString(payload, "itemType", "item_type", "kind")
   const role = readString(payload, "role")
   const normalizedItemType = (itemType ?? "")
@@ -83,17 +79,12 @@ export function completeAssistantMessageItem(
     return
   }
   clearContentPlanCapture(threadId)
-  useChatStore
-    .getState()
-    .finalizeStream(
-      threadId,
-      {
-        ...backendOwnedFinalizeOptions(threadId, turnId ?? latest.activeTurnId),
-        // An assistant item can be commentary before more tools. Only the
-        // terminal turn event releases the composer and autonomous loop.
-        keepTurnActive: true,
-      }
-    )
+  useChatStore.getState().finalizeStream(threadId, {
+    ...backendOwnedFinalizeOptions(threadId, turnId ?? latest.activeTurnId),
+    // An assistant item can be commentary before more tools. Only the
+    // terminal turn event releases the composer and autonomous loop.
+    keepTurnActive: true,
+  })
 }
 
 export function planMarkdownFromContent(text: string): string {
@@ -127,12 +118,7 @@ export function turnDiffSummariesFromPayload(
     })
   }
 
-  const unifiedDiff = readString(
-    payload,
-    "unifiedDiff",
-    "unified_diff",
-    "diff"
-  )
+  const unifiedDiff = readString(payload, "unifiedDiff", "unified_diff", "diff")
   return unifiedDiff ? [...parseTurnDiffFilesFromUnifiedDiff(unifiedDiff)] : []
 }
 
@@ -144,6 +130,7 @@ function mergeTurnDiffSummaries<
     oldText: string
     newText: string
     isNew: boolean
+    textOmitted?: boolean
   },
 >(existingDiffs: T[], summaries: TurnDiffFileSummary[]): T[] {
   const byPath = new Map(existingDiffs.map((diff) => [diff.path, { ...diff }]))
@@ -157,6 +144,8 @@ function mergeTurnDiffSummaries<
       oldText: existing?.oldText ?? "",
       newText: existing?.newText ?? "",
       isNew: existing?.isNew ?? false,
+      // A light page's placeholder stays one until the full text is read.
+      ...(existing?.textOmitted ? { textOmitted: true } : {}),
     } as T)
   }
 
@@ -239,11 +228,7 @@ export function recordCapturedCheckpoint(
   threadId: string,
   payload: Record<string, unknown>
 ) {
-  const checkpointRef = readString(
-    payload,
-    "checkpointRef",
-    "checkpoint_ref"
-  )
+  const checkpointRef = readString(payload, "checkpointRef", "checkpoint_ref")
   if (!checkpointRef) return
   const thread = useChatStore
     .getState()
@@ -253,12 +238,7 @@ export function recordCapturedCheckpoint(
   const turnId = payloadTurnId(payload) ?? null
   const messageId = latestAssistantMessageIdForCheckpoint(threadId, turnId)
   if (!messageId) return
-  const unifiedDiff = readString(
-    payload,
-    "unifiedDiff",
-    "unified_diff",
-    "diff"
-  )
+  const unifiedDiff = readString(payload, "unifiedDiff", "unified_diff", "diff")
 
   useCheckpointStore.getState().recordGitCheckpoint({
     threadId,

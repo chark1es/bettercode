@@ -1,11 +1,10 @@
-import type { Context, Hono } from "hono";
-import type { AppState } from "../../appState";
-import { requestIdentity } from "../../remote/http";
-import * as browser from "../../services/filesystem-browser";
-import { resolveApprovedWorkspaceRoot } from "../../services/workspace/authorization";
-import { filesystemListSchema, filesystemSearchSchema } from "../validation";
-import { parseAndHandle } from "../routeHelpers";
-import { sanitizeError } from "../errors";
+import type { Context, Hono } from "hono"
+import type { AppState } from "../../appState"
+import { requestIdentity } from "../../remote/http"
+import * as browser from "../../services/filesystem-browser"
+import { resolveApprovedWorkspaceRoot } from "../../services/workspace/authorization"
+import { contractJson, handleHttpContract } from "../contracts"
+import { sanitizeError } from "../errors"
 
 /**
  * Read-only filesystem browsing endpoints, backing the System Browser
@@ -23,44 +22,56 @@ import { sanitizeError } from "../errors";
  * tests; the router always passes it.
  *
  * No write operations are exposed here; for writes go through `/workspace/*`
- * which enforces project containment.
+ * which enforces project containment. Every route answers with its shared
+ * contract (`@betterc0de/schema/http-contracts`).
  */
 export function registerFilesystemRoutes(api: Hono, state?: AppState): void {
-  const confineForRemote = async (c: Context, requested: string): Promise<string> => {
-    if (!state) return requested;
-    const identity = requestIdentity(c, state.config, state);
-    if (identity?.kind !== "remote") return requested;
-    return resolveApprovedWorkspaceRoot(state, requested);
-  };
+  const confineForRemote = async (
+    c: Context,
+    requested: string
+  ): Promise<string> => {
+    if (!state) return requested
+    const identity = requestIdentity(c, state.config, state)
+    if (identity?.kind !== "remote") return requested
+    return resolveApprovedWorkspaceRoot(state, requested)
+  }
 
   api.post("/filesystem/list", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      filesystemListSchema,
+      "filesystemList",
       async (b) =>
-        browser.listDirectory(await confineForRemote(c, b.path), b.showHidden),
-      { operation: "filesystem list" },
-    ),
-  );
+        browser.listDirectory(
+          await confineForRemote(c, b.path),
+          b.showHidden,
+          b.offset
+        ),
+      { operation: "filesystem list" }
+    )
+  )
 
   api.post("/filesystem/search", (c) =>
-    parseAndHandle(
+    handleHttpContract(
       c,
-      filesystemSearchSchema,
+      "filesystemSearch",
       async (b) =>
         browser.searchTree(await confineForRemote(c, b.root), b.query, b.limit),
-      { operation: "filesystem search" },
-    ),
-  );
+      { operation: "filesystem search" }
+    )
+  )
 
   api.get("/filesystem/drives", async (c) => {
     try {
-      return c.json(await browser.enumerateDrives());
+      return contractJson(
+        c,
+        "filesystemDrives",
+        await browser.enumerateDrives()
+      )
     } catch (err) {
       const { message, statusCode } = sanitizeError(err, "filesystem drives", {
         path: "/filesystem/drives",
-      });
-      return c.json({ error: message }, statusCode as 500);
+      })
+      return c.json({ error: message }, statusCode as 500)
     }
-  });
+  })
 }

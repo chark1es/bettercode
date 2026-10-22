@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { useAppearanceStore } from "@/lib/appearance-store"
 import { usePluginStore } from "@/lib/plugin-store"
 import { usePreferencesStore } from "@/lib/preferences-store"
-import { gitUserProfile } from "@/services/backend"
+import { gitUserProfile } from "@/services/backend/gitApi"
 
 /**
  * Startup initialization for persisted state + local git user info.
@@ -22,7 +22,9 @@ export function useStartupInit(gitCwd?: string | null) {
     usePluginStore
       .getState()
       .init()
-      .catch(() => { console.warn("Failed to initialize plugin store") })
+      .catch(() => {
+        console.warn("Failed to initialize plugin store")
+      })
   }, [])
   useEffect(() => {
     useAppearanceStore.getState().load()

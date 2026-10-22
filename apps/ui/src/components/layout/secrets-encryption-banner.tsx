@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { getElectronApi } from "@/services/ipc-facade"
 
 /**
  * S4: persistent banner shown when the OS keyring is unavailable and
@@ -31,14 +32,15 @@ export function SecretsEncryptionBanner() {
   const [available, setAvailable] = useState<boolean | null>(null)
   const [platform, setPlatform] = useState<NodeJS.Platform | undefined>()
   const [dismissed, setDismissed] = useState(
-    typeof window !== "undefined" && window.localStorage?.getItem(DISMISS_KEY) === "1",
+    typeof window !== "undefined" &&
+      window.localStorage?.getItem(DISMISS_KEY) === "1"
   )
 
   useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
-        const info = await window.electronAPI?.getAppInfo?.()
+        const info = await getElectronApi()?.getAppInfo?.()
         if (cancelled) return
         // Older builds don't return the field; treat absent as encrypted
         // so we don't false-alarm users on macOS/Windows.
@@ -89,10 +91,9 @@ export function SecretsEncryptionBanner() {
       }}
     >
       <span>
-        <strong>Stored secrets are unencrypted.</strong>{" "}
-        The OS keyring is unavailable, so API keys, passwords, and plugin
-        secrets live in plaintext on disk.{" "}
-        {platformAdvice(platform)}
+        <strong>Stored secrets are unencrypted.</strong> The OS keyring is
+        unavailable, so API keys, passwords, and plugin secrets live in
+        plaintext on disk. {platformAdvice(platform)}
       </span>
       <button
         type="button"
