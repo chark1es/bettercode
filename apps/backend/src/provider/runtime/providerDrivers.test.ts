@@ -60,7 +60,14 @@ describe("provider driver registry", () => {
 
   it("derives the hub-served provider kinds", () => {
     expect([...HUB_PROVIDER_KINDS].sort()).toEqual(
-      ["betterc0de", "claude", "codex", "cursor", "grok_cli", "opencode_cli"].sort()
+      [
+        "betterc0de",
+        "claude",
+        "codex",
+        "cursor",
+        "grok_cli",
+        "opencode_cli",
+      ].sort()
     )
     expect(isHubProviderKind("grok_cli")).toBe(true)
     // The API-key providers still run on the legacy stack.
