@@ -4,7 +4,6 @@ import {
   detectCodexCliAsync,
   isClaudeCliAuthenticatedAsync,
   isCodexCliAuthenticatedAsync,
-  isOpencodeCliAuthenticatedAsync,
 } from "../cli/detect"
 import {
   probeGrokProviderStatusAsync,
@@ -14,6 +13,7 @@ import {
   resolveCursorBinaryAsync,
   type ResolvedCursorBinary,
 } from "../provider/runtime/cursor/CursorBinaryResolution"
+import { probeOpenCodeProviderStatusAsync } from "../provider/runtime/opencode/OpenCodeProviderStatus"
 
 /**
  * The read-only slice of the direct-API adapter registry this probe reports
@@ -90,12 +90,22 @@ export function createCliStatusReader(
         isAuthenticated: isCodexCliAuthenticatedAsync,
         authType: "cli",
       }),
-    detectOpencode: (refresh) =>
-      detectCliAsync("opencode", {
+    detectOpencode: async (refresh) => {
+      const probe = await probeOpenCodeProviderStatusAsync({
+        env: process.env,
         refresh,
-        isAuthenticated: isOpencodeCliAuthenticatedAsync,
-        authType: "cli",
-      }),
+      })
+      return {
+        installed: probe.installed,
+        version: probe.version,
+        binaryPath: probe.binaryPath ?? "",
+        authenticated: probe.auth.status === "authenticated",
+        authType:
+          probe.auth.status === "authenticated"
+            ? (probe.auth.type ?? "cli")
+            : null,
+      }
+    },
     probeGrok: () => probeGrokProviderStatusAsync({ env: process.env }),
     resolveCursor: () => resolveCursorBinaryAsync(null),
     now: Date.now,

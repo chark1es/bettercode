@@ -122,19 +122,20 @@ export const PROVIDER_DRIVERS = [
     settingsKeys: ["binaryPath", "customModels"],
   },
   {
-    // The upstream `opencode` binary's headless server. Kept distinct from
-    // `betterc0de` so both can be configured side by side, even though they
-    // share the OpenCode-family HTTP/SSE wire protocol. Bare `opencode` is
-    // NOT an alias: it is the long-standing spelling of the BetterC0de
-    // compatibility driver (`open-code`) and must keep normalizing there.
+    // The upstream `opencode` binary's ACP server (`opencode acp`). Kept
+    // distinct from `betterc0de` so both can be configured side by side. Bare
+    // `opencode` is NOT an alias: it is the long-standing spelling of the
+    // BetterC0de compatibility driver (`open-code`) and must keep normalizing
+    // there.
     driver: "opencode-cli",
     providerKind: "opencode_cli",
     aliases: ["opencodecli", "opencodeserver", "opencodeacp"],
     defaultInstanceIds: ["opencode-cli"],
     catalogId: "opencode-cli",
-    protocol: "betterc0de-compat",
+    protocol: "acp",
     settingsKeys: [
       "binaryPath",
+      // Kept for configs saved before the ACP migration; no longer read.
       "serverUrl",
       "serverUsername",
       "serverPassword",

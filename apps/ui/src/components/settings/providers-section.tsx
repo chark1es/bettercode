@@ -1088,7 +1088,7 @@ const INSTANCE_DRIVERS: ReadonlyArray<{
   {
     driver: "opencode-cli",
     label: "OpenCode CLI",
-    hint: "A local OpenCode server or binary",
+    hint: "Another local OpenCode binary (ACP)",
   },
 ]
 
@@ -1675,8 +1675,7 @@ function InstanceCard({
                 />
               </InstanceField>
             ) : null}
-            {config.driver === "betterc0de" ||
-            config.driver === "opencode-cli" ? (
+            {config.driver === "betterc0de" ? (
               <>
                 <InstanceField
                   label="Server URL"
@@ -2178,7 +2177,7 @@ function createProviderInstanceConfig(
       ...(driver === "codex" || driver === "claude" ? { homePath: "" } : {}),
       ...(driver === "codex" ? { shadowHomePath: "" } : {}),
       ...(driver === "cursor" ? { apiEndpoint: "" } : {}),
-      ...(driver === "betterc0de" || driver === "opencode-cli"
+      ...(driver === "betterc0de"
         ? { serverUrl: "", serverUsername: "", serverPassword: "" }
         : {}),
       customModels: [],

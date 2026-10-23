@@ -38,11 +38,16 @@ import {
   resolveAcpAdvertisedModelId,
   resolveAcpConfigUpdates,
 } from "../provider/runtime/acp/AcpSessionConfig"
+import {
+  createOpenCodeAcpRuntime,
+  type OpenCodeAcpRuntime,
+  type OpenCodeAcpRuntimeOptions,
+} from "../provider/runtime/opencode/OpenCodeAcpRuntime"
+import { resolveOpenCodeBinaryAsync } from "../provider/runtime/opencode/OpenCodeBinaryResolution"
 import { createBetterC0deCompatHttpClient } from "../provider/runtime/BetterC0deCompatHttpClient"
 import { parseBetterC0deModelSlug } from "../provider/runtime/betterc0deCompat/BetterC0deCompatRuntimeSupport"
 import {
   BETTERC0DE_COMPAT_PROFILE,
-  OPENCODE_CLI_PROFILE,
   type OpenCodeCompatProfile,
 } from "../provider/runtime/betterc0deCompat/OpenCodeCompatProfile"
 import { extractJsonObject } from "./text-generation"
@@ -107,6 +112,9 @@ export interface NativeTextGenerationRunner {
   readonly createGrokRuntime?: (
     input: GrokAcpRuntimeOptions
   ) => CursorAcpRuntime
+  readonly createOpenCodeRuntime?: (
+    input: OpenCodeAcpRuntimeOptions
+  ) => OpenCodeAcpRuntime
 }
 
 const DEFAULT_TIMEOUT_MS = 180_000
@@ -504,6 +512,16 @@ export class NativeTextGenerationService {
           driver
         )
       }
+      if (driver === "opencode") {
+        return await this.runAcpTextGeneration(
+          input,
+          providerConfig,
+          modelSelection,
+          runner,
+          operation.controller.signal,
+          driver
+        )
+      }
       return null
     } finally {
       this.releaseNativeTextGenerationSlot(operation)
@@ -816,7 +834,7 @@ export class NativeTextGenerationService {
     runner: NativeTextGenerationRunner,
     lifecycleSignal: AbortSignal
   ): Promise<string> {
-    const profile = profileForTextDriver(config.driver)
+    const profile = BETTERC0DE_COMPAT_PROFILE
     const parsedModel = parseBetterC0deModelSlug(modelSelection.model)
     if (!parsedModel) {
       throw new Error(
@@ -1068,7 +1086,7 @@ export class NativeTextGenerationService {
     modelSelection: ModelSelection,
     runner: NativeTextGenerationRunner,
     lifecycleSignal: AbortSignal,
-    driver: "cursor" | "grok"
+    driver: "cursor" | "grok" | "opencode"
   ): Promise<string> {
     // Native text-generation prompts already contain the required repository
     // context. Do not give the external ACP agent the repository as its cwd:
@@ -1076,12 +1094,13 @@ export class NativeTextGenerationService {
     const tempDir = await fs.mkdtemp(
       path.join(os.tmpdir(), `betterc0de-${driver}-text-generation-`)
     )
-    const createRuntime =
+    const label =
       driver === "grok"
-        ? (runner.createGrokRuntime ?? createGrokAcpRuntime)
-        : (runner.createCursorRuntime ?? createCursorAcpRuntime)
-    const label = driver === "grok" ? "Grok" : "Cursor Agent"
-    let runtime: CursorAcpRuntime | null = null
+        ? "Grok"
+        : driver === "opencode"
+          ? "OpenCode"
+          : "Cursor Agent"
+    let runtime: CursorAcpRuntime | OpenCodeAcpRuntime | null = null
     let unsubscribe = () => {}
     const output = new BoundedOutputBuffer(NATIVE_PROCESS_MAX_OUTPUT_BYTES)
     let outputExceeded = false
@@ -1093,12 +1112,24 @@ export class NativeTextGenerationService {
     try {
       let binaryPath =
         configString(config.config, "binaryPath") ??
-        (driver === "grok" ? "grok" : CURSOR_BINARY_NAME)
+        (driver === "grok"
+          ? "grok"
+          : driver === "opencode"
+            ? "opencode"
+            : CURSOR_BINARY_NAME)
       if (driver === "grok" && !runner.createGrokRuntime) {
         const resolved = await resolveGrokBinaryAsync(binaryPath)
         if (!resolved)
           throw new Error(
             "xAI Grok CLI is unavailable for the provider handoff."
+          )
+        binaryPath = resolved.binaryPath
+      }
+      if (driver === "opencode" && !runner.createOpenCodeRuntime) {
+        const resolved = await resolveOpenCodeBinaryAsync(binaryPath)
+        if (!resolved)
+          throw new Error(
+            "OpenCode CLI is unavailable for the provider handoff."
           )
         binaryPath = resolved.binaryPath
       }
@@ -1111,11 +1142,7 @@ export class NativeTextGenerationService {
         binaryPath = resolved.binaryPath
       }
       this.throwIfNativeTextGenerationUnavailable(lifecycleSignal)
-      runtime = createRuntime({
-        settings: {
-          binaryPath,
-          apiEndpoint: configString(config.config, "apiEndpoint") ?? undefined,
-        },
+      const runtimeOptions = {
         cwd: tempDir,
         env: providerEnvironment(config),
         clientInfo: {
@@ -1123,7 +1150,26 @@ export class NativeTextGenerationService {
           title: "BetterC0de",
           version: "0.0.0",
         },
-      })
+      }
+      runtime =
+        driver === "grok"
+          ? (runner.createGrokRuntime ?? createGrokAcpRuntime)({
+              ...runtimeOptions,
+              settings: { binaryPath },
+            })
+          : driver === "opencode"
+            ? (runner.createOpenCodeRuntime ?? createOpenCodeAcpRuntime)({
+                ...runtimeOptions,
+                settings: { binaryPath, permissionPolicy: "deny" },
+              })
+            : (runner.createCursorRuntime ?? createCursorAcpRuntime)({
+                ...runtimeOptions,
+                settings: {
+                  binaryPath,
+                  apiEndpoint:
+                    configString(config.config, "apiEndpoint") ?? undefined,
+                },
+              })
       onLifecycleAbort = () => {
         if (cancellationRequested) return
         cancellationRequested = true
@@ -1943,11 +1989,13 @@ function normalizeNativeDriver(
     key === "bettercode" ||
     key === "betterc0decli" ||
     key === "bettercodecli" ||
-    key === "opencode" ||
-    key === "opencodecli"
+    key === "opencode"
   ) {
     return "betterc0de"
   }
+  // The upstream `opencode` binary's ACP server. Bare `opencode` above is the
+  // legacy BetterC0de compatibility spelling and must stay there.
+  if (key === "opencodecli") return "opencode"
   if (key === "cursor" || key === "cursoragent" || key === "cursoracp") {
     return "cursor"
   }
@@ -2058,25 +2106,6 @@ async function defaultBetterC0deClientFactory(
     serverPassword: input.serverPassword,
     v2Envelope: profile.v2Envelope,
   })
-}
-
-/**
- * Which OpenCode-family CLI a native text-generation request drives. The
- * `opencode` binary speaks the same protocol as BetterC0de's compatibility
- * CLI but wraps v2 inventory payloads, so the v2 envelope flag differs.
- */
-function profileForTextDriver(
-  driver: string | undefined
-): OpenCodeCompatProfile {
-  const key = (driver ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[_\s-]+/g, "")
-  // `opencode-cli` is the upstream `opencode` binary's driver; bare
-  // `opencode` and `open-code` stay aliases of the BetterC0de compat driver
-  // (see normalizeDriverForCompat) and must keep its profile.
-  if (key === "opencodecli") return OPENCODE_CLI_PROFILE
-  return BETTERC0DE_COMPAT_PROFILE
 }
 
 function firstDefinedEnv(names: ReadonlyArray<string>): string | undefined {

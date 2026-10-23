@@ -99,35 +99,3 @@ export const BETTERC0DE_COMPAT_PROFILE: OpenCodeCompatProfile = {
   v2Envelope: false,
   v2NestedApi: false,
 }
-
-export const OPENCODE_CLI_PROFILE: OpenCodeCompatProfile = {
-  providerKind: "opencode_cli",
-  rawSource: "opencode.sdk.event",
-  displayName: "OpenCode",
-  taskIdPrefix: "opencode",
-  metadataNamespace: "opencode",
-  defaultBinaryPath: "opencode",
-  versionArgs: ["--version"],
-  serveArgs: (port, hostname) => [
-    "serve",
-    `--hostname=${hostname}`,
-    `--port=${port}`,
-  ],
-  // `opencode serve` has no config-content override; it reads the user's
-  // real opencode config, which is the point of driving the CLI.
-  configContentEnv: [],
-  minimumVersion: null,
-  serverReadyPrefixes: ["opencode server listening"],
-  serverReadyUrlPattern: /on\s+(https?:\/\/[^\s]+)/,
-  serverAuthUsername: "opencode",
-  serverPasswordEnvVars: ["OPENCODE_SERVER_PASSWORD"],
-  serverUsernameEnvVars: ["OPENCODE_SERVER_USERNAME"],
-  v2Envelope: true,
-  v2NestedApi: true,
-}
-
-export function isOpenCodeFamilyProfile(
-  profile: OpenCodeCompatProfile
-): boolean {
-  return profile.providerKind === "opencode_cli"
-}

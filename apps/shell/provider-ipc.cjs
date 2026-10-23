@@ -119,13 +119,13 @@ const PROVIDER_CATALOG = [
     ],
   },
   {
-    // CLI-backed: spawns the upstream `opencode` binary's headless server and
-    // drives its v1/v2 HTTP surface. Kept distinct from the BetterC0de
+    // CLI-backed: spawns the upstream `opencode` binary's Agent Client
+    // Protocol server (`opencode acp`). Kept distinct from the BetterC0de
     // compatibility entry so both can show side by side.
-    // Backend runtime adapter: provider/runtime/opencode/OpenCodeAdapter.ts.
+    // Backend runtime adapter: provider/runtime/opencode/OpenCodeAcpAdapter.ts.
     id: "opencode-cli",
     name: "OpenCode CLI",
-    description: "The local `opencode` binary — uses your CLI login (v1 and v2 APIs).",
+    description: "The local `opencode` binary — uses your CLI login (ACP).",
     docsUrl: "https://opencode.ai/docs",
     // Used only until the CLI's live inventory advertises its model picker.
     defaultModels: ["opencode/big-pickle"],

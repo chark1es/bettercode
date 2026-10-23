@@ -696,8 +696,14 @@ function normalizeDriver(driver: string): string {
   ) {
     return "betterc0de"
   }
-  if (normalized === "opencode" || normalized === "opencodecli") {
+  if (
+    normalized === "opencodecli" ||
+    normalized === "opencodeacp" ||
+    normalized === "opencodeserver"
+  ) {
     return "opencode-cli"
   }
+  // Bare `opencode` is the legacy BetterC0de compatibility driver spelling.
+  if (normalized === "opencode") return "betterc0de"
   return normalized || driver
 }

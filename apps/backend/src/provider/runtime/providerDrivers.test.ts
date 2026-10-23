@@ -79,6 +79,7 @@ describe("provider driver registry", () => {
   it("gives only the ACP drivers the ACP session budgets", () => {
     expect(isAcpProviderDriver("cursor")).toBe(true)
     expect(isAcpProviderDriver("grok-cli")).toBe(true)
+    expect(isAcpProviderDriver("opencode-cli")).toBe(true)
     expect(isAcpProviderDriver("codex")).toBe(false)
     expect(isAcpProviderDriver("claude")).toBe(false)
     expect(isAcpProviderDriver("unknown")).toBe(false)
