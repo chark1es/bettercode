@@ -62,6 +62,9 @@ function getBundledPluginsDirectory() {
     : path.join(__dirname, "default-plugins")
 }
 
+// Electron 43 opens file dialogs in Downloads instead of the last-used folder.
+let lastPickedPluginFolder
+
 async function registerPluginHandlers() {
   if (handlersRegistered) return
   handlersRegistered = true
@@ -81,9 +84,10 @@ async function registerPluginHandlers() {
       const result = await dialog.showOpenDialog(getWindow(), {
         properties: ["openDirectory"],
         title: "Select Plugin Folder",
+        defaultPath: lastPickedPluginFolder,
       })
       if (result.canceled || !result.filePaths[0]) return { ok: false }
-      sourcePath = result.filePaths[0]
+      sourcePath = lastPickedPluginFolder = result.filePaths[0]
     } else {
       if (typeof sourcePath !== "string" || sourcePath.length === 0) {
         throw new Error("Invalid sourcePath")

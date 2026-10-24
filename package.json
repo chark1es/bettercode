@@ -170,13 +170,17 @@
     "metro-config": "0.84.5",
     "metro-transform-worker": "0.84.5",
     "react-native-reanimated": "4.3.1",
-    "react-native-worklets": "0.8.3"
+    "react-native-worklets": "0.8.3",
+    "@remotion/studio": {
+      "zod": "^4.6.7"
+    }
   },
   "build": {
     "appId": "com.betterc0de.ide",
     "productName": "BetterC0de",
     "compression": "normal",
     "asar": true,
+    "afterPack": "scripts/prune-native-prebuilds.cjs",
     "afterSign": "apps/shell/build/notarize.cjs",
     "asarUnpack": [
       "apps/shell/default-plugins/**/*",

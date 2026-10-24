@@ -2354,12 +2354,17 @@ ipcMain.handle(IpcChannel.OpenPath, async (_, p) => {
   }
 })
 
+// Electron 43 opens file dialogs in Downloads instead of the last-used folder.
+let lastPickedFolder
 ipcMain.handle(IpcChannel.PickFolder, async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openDirectory"],
     title: "Select Project Folder",
+    defaultPath: lastPickedFolder,
   })
-  return result.canceled ? null : result.filePaths[0] || null
+  const picked = result.canceled ? null : result.filePaths[0] || null
+  if (picked) lastPickedFolder = picked
+  return picked
 })
 
 ipcMain.handle(IpcChannel.OpenHtmlPreview, async (event, input) => {
