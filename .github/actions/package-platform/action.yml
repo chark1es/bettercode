@@ -43,13 +43,13 @@ runs:
         done
         SIGNING_METADATA=$(node -p "require('./scripts/pack-electron.cjs').buildSigningMetadataArgs()[0]")
         npx electron-builder ${{ inputs.platform-flag }} --${{ inputs.arch }} --dir --publish never "$SIGNING_METADATA"
-    - name: Enforce packaged size budgets
-      shell: bash
-      run: npm run audit:package-size
     - name: Smoke-test packaged application startup
       id: packaged-smoke
       shell: bash
       run: npm run smoke:package
+    - name: Enforce packaged size budgets
+      shell: bash
+      run: npm run audit:package-size
     - name: Build installers
       if: inputs.build-installers == 'true'
       shell: bash

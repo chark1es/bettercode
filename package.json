@@ -69,10 +69,10 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.123",
     "@anthropic-ai/sdk": "^0.105.0",
     "@hono/node-server": "^1.14.0",
-    "@modelcontextprotocol/sdk": "~1.29.0",
+    "@modelcontextprotocol/sdk": "~1.32.2",
     "@types/dompurify": "^3.0.5",
     "better-sqlite3": "^12.9.0",
-    "dompurify": "^3.3.3",
+    "dompurify": "^3.4.17",
     "electron-updater": "^6.8.3",
     "fast-glob": "^3.3.3",
     "hono": "^4.10.7",
@@ -106,7 +106,7 @@
     "@tailwindcss/vite": "^4.2.1",
     "@tanstack/react-virtual": "^3.13.24",
     "@types/color": "^4.2.1",
-    "@types/node": "^24.12.0",
+    "@types/node": "^24.12.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
@@ -119,8 +119,8 @@
     "color": "^5.0.3",
     "concurrently": "^9.2.1",
     "css-loader": "^7.1.4",
-    "electron": "^41.2.0",
-    "electron-builder": "^26.0.12",
+    "electron": "^43.8.3",
+    "electron-builder": "^26.15.3",
     "embla-carousel-react": "^8.6.0",
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^7.0.1",
@@ -139,13 +139,13 @@
     "postcss-loader": "^8.2.1",
     "prettier": "^3.8.1",
     "prettier-plugin-tailwindcss": "^0.7.2",
+    "qrcode.react": "^4.2.0",
     "radix-ui": "^1.4.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "react-dropzone": "^15.0.0",
     "react-native": "0.85.3",
     "react-native-svg": "15.15.4",
-    "react-dropzone": "^15.0.0",
-    "qrcode.react": "^4.2.0",
     "remotion": "4.0.496",
     "shadcn": "^4.1.2",
     "shiki": "^4.0.2",
@@ -170,13 +170,17 @@
     "metro-config": "0.84.5",
     "metro-transform-worker": "0.84.5",
     "react-native-reanimated": "4.3.1",
-    "react-native-worklets": "0.8.3"
+    "react-native-worklets": "0.8.3",
+    "@remotion/studio": {
+      "zod": "^4.6.7"
+    }
   },
   "build": {
     "appId": "com.betterc0de.ide",
     "productName": "BetterC0de",
     "compression": "normal",
     "asar": true,
+    "afterPack": "scripts/prune-native-modules.cjs",
     "afterSign": "apps/shell/build/notarize.cjs",
     "asarUnpack": [
       "apps/shell/default-plugins/**/*",
@@ -377,7 +381,7 @@
   },
   "author": "BetterC0de contributors",
   "engines": {
-    "node": ">=22.15.0",
+    "node": ">=22.23.4",
     "npm": ">=10"
   },
   "license": "MIT"

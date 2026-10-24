@@ -376,3 +376,60 @@ test("CI includes signing metadata and electron-builder preserves its boolean ty
     assert.equal(typeof normalized.config.extraMetadata.betterc0deCodeSigned, "boolean")
   }
 })
+
+test("afterPack prunes node-pty prebuilds that the target cannot load", () => {
+  const { pruneNodePtyPrebuilds, pruneNativeBuildInputs } = require("./prune-native-modules.cjs")
+  const config = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).build
+  assert.equal(config.afterPack, "scripts/prune-native-modules.cjs")
+
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(import.meta.dirname), ".prebuilds-"))
+  try {
+    const layout = () => {
+      const resourcesDir = fs.mkdtempSync(path.join(tmp, "res-"))
+      const prebuilds = path.join(resourcesDir, "app.asar.unpacked", "node_modules", "node-pty", "prebuilds")
+      for (const dir of ["darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64"]) {
+        fs.mkdirSync(path.join(prebuilds, dir), { recursive: true })
+        fs.writeFileSync(path.join(prebuilds, dir, "pty.node"), "x")
+        fs.writeFileSync(path.join(prebuilds, dir, "pty.pdb"), "x")
+      }
+      fs.mkdirSync(path.join(prebuilds, "win32-x64", "conpty"))
+      fs.writeFileSync(path.join(prebuilds, "win32-x64", "conpty", "conpty.dll"), "x")
+      return { resourcesDir, prebuilds }
+    }
+
+    const win = layout()
+    pruneNodePtyPrebuilds({ resourcesDir: win.resourcesDir, platform: "win32", arch: "x64" })
+    assert.deepEqual(fs.readdirSync(win.prebuilds), ["win32-x64"])
+    assert.deepEqual(fs.readdirSync(path.join(win.prebuilds, "win32-x64")).sort(), ["conpty", "pty.node"])
+
+    const mac = layout()
+    pruneNodePtyPrebuilds({ resourcesDir: mac.resourcesDir, platform: "darwin", arch: "universal" })
+    assert.deepEqual(fs.readdirSync(mac.prebuilds).sort(), ["darwin-arm64", "darwin-x64"])
+
+    const linux = layout()
+    pruneNodePtyPrebuilds({ resourcesDir: linux.resourcesDir, platform: "linux", arch: "x64" })
+    assert.deepEqual(fs.readdirSync(linux.prebuilds), [])
+
+    const native = layout()
+    const modules = path.join(native.resourcesDir, "app.asar.unpacked", "node_modules")
+    const sqlite = path.join(modules, "better-sqlite3")
+    fs.mkdirSync(path.join(sqlite, "deps", "sqlite3"), { recursive: true })
+    fs.mkdirSync(path.join(sqlite, "src"), { recursive: true })
+    fs.mkdirSync(path.join(sqlite, "lib"), { recursive: true })
+    fs.mkdirSync(path.join(sqlite, "build", "Release", "obj", "sqlite3"), { recursive: true })
+    fs.writeFileSync(path.join(sqlite, "deps", "sqlite3", "sqlite3.c"), "x")
+    fs.writeFileSync(path.join(sqlite, "lib", "index.js"), "x")
+    for (const f of ["better_sqlite3.node", "better_sqlite3.iobj", "better_sqlite3.lib", "better_sqlite3.exp"]) {
+      fs.writeFileSync(path.join(sqlite, "build", "Release", f), "x")
+    }
+    fs.writeFileSync(path.join(sqlite, "build", "Release", "obj", "sqlite3", "sqlite3.obj"), "x")
+    assert.ok(pruneNativeBuildInputs({ resourcesDir: native.resourcesDir }) > 0)
+    assert.deepEqual(fs.readdirSync(sqlite).sort(), ["build", "lib"])
+    assert.deepEqual(fs.readdirSync(path.join(sqlite, "build", "Release")), ["better_sqlite3.node"])
+
+    // No node-pty in the package is not an error.
+    pruneNodePtyPrebuilds({ resourcesDir: path.join(tmp, "missing"), platform: "win32", arch: "x64" })
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
