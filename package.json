@@ -180,7 +180,7 @@
     "productName": "BetterC0de",
     "compression": "normal",
     "asar": true,
-    "afterPack": "scripts/prune-native-prebuilds.cjs",
+    "afterPack": "scripts/prune-native-modules.cjs",
     "afterSign": "apps/shell/build/notarize.cjs",
     "asarUnpack": [
       "apps/shell/default-plugins/**/*",
